@@ -466,6 +466,27 @@ function shouldClose(): boolean {
 }
 
 const IPC_INPUT_INTERRUPT_SENTINEL = path.join(IPC_INPUT_DIR, '_interrupt');
+const INTERRUPT_GRACE_WINDOW_MS = 10_000;
+let lastInterruptRequestedAt = 0;
+
+function markInterruptRequested(): void {
+  lastInterruptRequestedAt = Date.now();
+}
+
+function clearInterruptRequested(): void {
+  lastInterruptRequestedAt = 0;
+}
+
+function isWithinInterruptGraceWindow(): boolean {
+  return lastInterruptRequestedAt > 0 && Date.now() - lastInterruptRequestedAt <= INTERRUPT_GRACE_WINDOW_MS;
+}
+
+function isInterruptRelatedError(err: unknown): boolean {
+  const errno = err as NodeJS.ErrnoException;
+  const message = err instanceof Error ? err.message : String(err ?? '');
+  return errno?.code === 'ABORT_ERR'
+    || /abort|aborted|interrupt|interrupted|cancelled|canceled/i.test(message);
+}
 
 /**
  * Check for _interrupt sentinel (graceful query interruption).
@@ -473,6 +494,7 @@ const IPC_INPUT_INTERRUPT_SENTINEL = path.join(IPC_INPUT_DIR, '_interrupt');
 function shouldInterrupt(): boolean {
   if (fs.existsSync(IPC_INPUT_INTERRUPT_SENTINEL)) {
     try { fs.unlinkSync(IPC_INPUT_INTERRUPT_SENTINEL); } catch { /* ignore */ }
+    markInterruptRequested();
     return true;
   }
   return false;
@@ -528,6 +550,10 @@ function waitForIpcMessage(): Promise<{ text: string; images?: Array<{ data: str
       if (shouldClose()) {
         resolve(null);
         return;
+      }
+      if (shouldInterrupt()) {
+        log('Interrupt sentinel received while idle, ignoring');
+        clearInterruptRequested();
       }
       const { messages, modeChange } = drainIpcInput();
       if (modeChange) {
@@ -955,6 +981,11 @@ async function runQuery(
       return { newSessionId, lastAssistantUuid, closedDuringQuery, unrecoverableTranscriptError: true, interruptedDuringQuery };
     }
 
+    if (interruptedDuringQuery && isInterruptRelatedError(err)) {
+      log(`Ignoring interrupt-related query error: ${errorMessage}`);
+      return { newSessionId, lastAssistantUuid, closedDuringQuery, interruptedDuringQuery: true };
+    }
+
     // 其他错误：记录完整堆栈后继续抛出
     log(`runQuery error [${(err as NodeJS.ErrnoException).code ?? 'unknown'}]: ${errorMessage}`);
     if (err instanceof Error && err.stack) {
@@ -1035,6 +1066,7 @@ async function main(): Promise<void> {
     while (true) {
       // 清理残留的 _interrupt sentinel，防止空闲期间写入的中断信号影响下一次 query
       try { fs.unlinkSync(IPC_INPUT_INTERRUPT_SENTINEL); } catch { /* ignore */ }
+      clearInterruptRequested();
 
       log(`Starting query (session: ${sessionId || 'new'}, resumeAt: ${resumeAt || 'latest'})...`);
 
@@ -1125,6 +1157,7 @@ async function main(): Promise<void> {
           log('Close sentinel received after interrupt, exiting');
           break;
         }
+        clearInterruptRequested();
         prompt = nextMessage.text;
         promptImages = nextMessage.images;
         continue;
@@ -1226,6 +1259,10 @@ process.on('uncaughtException', (err: unknown) => {
   if (errno?.code === 'EPIPE') {
     process.exit(0);
   }
+  if (isWithinInterruptGraceWindow() && isInterruptRelatedError(err)) {
+    console.error('Suppressing interrupt-related uncaught exception:', err);
+    process.exit(0);
+  }
   console.error('Uncaught exception:', err);
   // 尝试输出结构化错误，让主进程能收到错误信息而非仅看到 exit code 1
   try { writeOutput({ status: 'error', result: null, error: String(err) }); } catch { /* ignore */ }
@@ -1235,6 +1272,10 @@ process.on('uncaughtException', (err: unknown) => {
 process.on('unhandledRejection', (reason: unknown) => {
   const errno = reason as NodeJS.ErrnoException;
   if (errno?.code === 'EPIPE') {
+    process.exit(0);
+  }
+  if (isWithinInterruptGraceWindow() && isInterruptRelatedError(reason)) {
+    console.error('Suppressing unhandled rejection during interrupt:', reason);
     process.exit(0);
   }
   console.error('Unhandled rejection:', reason);

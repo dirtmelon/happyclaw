@@ -11,6 +11,7 @@ export type { GroupInfo, AgentInfo };
 export interface Message {
   id: string;
   chat_jid: string;
+  source_jid?: string;
   sender: string;
   sender_name: string;
   content: string;

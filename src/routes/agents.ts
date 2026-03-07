@@ -21,7 +21,7 @@ import {
   setRegisteredGroup,
 } from '../db.js';
 import { DATA_DIR } from '../config.js';
-import type { SubAgent } from '../types.js';
+import type { RegisteredGroup, SubAgent } from '../types.js';
 import { logger } from '../logger.js';
 import { getChannelType, extractChatId } from '../im-channel.js';
 
@@ -247,6 +247,7 @@ router.get('/:jid/im-groups', authMiddleware, async (c) => {
     name: string;
     bound_agent_id: string | null;
     bound_main_jid: string | null;
+    reply_policy: 'source_only' | 'mirror';
     bound_target_name: string | null;
     bound_workspace_name: string | null;
     avatar?: string;
@@ -279,6 +280,7 @@ router.get('/:jid/im-groups', authMiddleware, async (c) => {
       name: g.name,
       bound_agent_id: g.target_agent_id ?? null,
       bound_main_jid: g.target_main_jid ?? null,
+      reply_policy: g.reply_policy === 'mirror' ? 'mirror' : 'source_only',
       bound_target_name: boundTargetName,
       bound_workspace_name: boundWorkspaceName,
       channel_type: getChannelType(j) ?? 'unknown',
@@ -361,6 +363,7 @@ router.put('/:jid/agents/:agentId/im-binding', authMiddleware, async (c) => {
     return c.json({ error: 'Forbidden' }, 403);
   }
   const force = body.force === true;
+  const replyPolicy = body.reply_policy === 'mirror' ? 'mirror' : 'source_only';
   const hasConflict =
     (imGroup.target_agent_id && imGroup.target_agent_id !== agentId) ||
     !!imGroup.target_main_jid;
@@ -369,7 +372,12 @@ router.put('/:jid/agents/:agentId/im-binding', authMiddleware, async (c) => {
   }
 
   // Update DB + in-memory cache — clear target_main_jid to avoid conflicts
-  const updated = { ...imGroup, target_agent_id: agentId, target_main_jid: undefined };
+  const updated: RegisteredGroup = {
+    ...imGroup,
+    target_agent_id: agentId,
+    target_main_jid: undefined,
+    reply_policy: replyPolicy,
+  };
   setRegisteredGroup(imJid, updated);
   const deps = getWebDeps();
   if (deps) {
@@ -456,6 +464,7 @@ router.put('/:jid/im-binding', authMiddleware, async (c) => {
   }
   const targetMainJid = `web:${group.folder}`;
   const force = body.force === true;
+  const replyPolicy = body.reply_policy === 'mirror' ? 'mirror' : 'source_only';
   const hasConflict =
     !!imGroup.target_agent_id ||
     (imGroup.target_main_jid && imGroup.target_main_jid !== targetMainJid);
@@ -464,7 +473,12 @@ router.put('/:jid/im-binding', authMiddleware, async (c) => {
   }
 
   // Update DB + in-memory cache — clear target_agent_id to avoid conflicts
-  const updated = { ...imGroup, target_main_jid: targetMainJid, target_agent_id: undefined };
+  const updated: RegisteredGroup = {
+    ...imGroup,
+    target_main_jid: targetMainJid,
+    target_agent_id: undefined,
+    reply_policy: replyPolicy,
+  };
   setRegisteredGroup(imJid, updated);
   const deps = getWebDeps();
   if (deps) {

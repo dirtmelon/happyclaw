@@ -136,6 +136,15 @@ const IM_SEND_FAIL_THRESHOLD = 3;
 // Track consecutive IM health check failures per JID for safe auto-unbind
 const imHealthCheckFailCounts = new Map<string, number>();
 const IM_HEALTH_CHECK_FAIL_THRESHOLD = 3;
+const RELATIVE_IMAGE_EXTENSIONS = new Set([
+  '.png',
+  '.jpg',
+  '.jpeg',
+  '.gif',
+  '.webp',
+  '.bmp',
+  '.svg',
+]);
 
 /** Unbind an IM group from its conversation agent or main conversation, syncing DB + in-memory cache + failure counters. */
 function unbindImGroup(jid: string, reason: string): void {
@@ -143,7 +152,12 @@ function unbindImGroup(jid: string, reason: string): void {
   if (!group?.target_agent_id && !group?.target_main_jid) return;
   const agentId = group.target_agent_id;
   const targetMainJid = group.target_main_jid;
-  const updated = { ...group, target_agent_id: undefined, target_main_jid: undefined };
+  const updated = {
+    ...group,
+    target_agent_id: undefined,
+    target_main_jid: undefined,
+    reply_policy: 'source_only' as const,
+  };
   setRegisteredGroup(jid, updated);
   registeredGroups[jid] = updated;
   imSendFailCounts.delete(jid);
@@ -222,8 +236,52 @@ function resolveEffectiveGroup(group: RegisteredGroup): { effectiveGroup: Regist
 }
 
 /** Send a message to an IM channel with automatic fail-count tracking and auto-unbind. */
-function sendImWithFailTracking(imJid: string, text: string): void {
-  imManager.sendMessage(imJid, text).then(() => {
+function extractLocalImImagePaths(text: string, groupFolder?: string): string[] {
+  if (!groupFolder || !text) return [];
+
+  const workspaceRoot = path.resolve(GROUPS_DIR, groupFolder);
+  const seen = new Set<string>();
+  const imagePaths: string[] = [];
+  const candidates: string[] = [];
+  const markdownImageRe = /!\[[^\]]*]\(([^)]+)\)/g;
+  const taggedImageRe = /\[图片:\s*([^\]\n]+)\]/g;
+
+  const pushCandidate = (raw: string): void => {
+    const trimmed = raw.trim().replace(/^<|>$/g, '');
+    const pathToken = trimmed.split(/\s+/)[0]?.trim().replace(/^['"]|['"]$/g, '');
+    if (!pathToken || pathToken.startsWith('/') || pathToken.startsWith('data:') || /^[a-z]+:\/\//i.test(pathToken)) {
+      return;
+    }
+    candidates.push(pathToken);
+  };
+
+  for (const match of text.matchAll(markdownImageRe)) {
+    pushCandidate(match[1] || '');
+  }
+  for (const match of text.matchAll(taggedImageRe)) {
+    pushCandidate(match[1] || '');
+  }
+
+  for (const candidate of candidates) {
+    const resolved = path.resolve(workspaceRoot, candidate);
+    const ext = path.extname(resolved).toLowerCase();
+    if (!RELATIVE_IMAGE_EXTENSIONS.has(ext)) continue;
+    if (resolved !== workspaceRoot && !resolved.startsWith(workspaceRoot + path.sep)) continue;
+    if (seen.has(resolved)) continue;
+    try {
+      if (!fs.statSync(resolved).isFile()) continue;
+      seen.add(resolved);
+      imagePaths.push(resolved);
+    } catch {
+      continue;
+    }
+  }
+
+  return imagePaths;
+}
+
+function sendImWithFailTracking(imJid: string, text: string, localImagePaths: string[]): void {
+  imManager.sendMessage(imJid, text, localImagePaths).then(() => {
     imSendFailCounts.delete(imJid);
   }).catch((err) => {
     logger.warn({ imJid, err }, 'Failed to relay message to IM');
@@ -328,6 +386,7 @@ async function clearSessionRuntimeFiles(folder: string, agentId?: string): Promi
 async function handleCommand(chatJid: string, command: string): Promise<string | null> {
   const parts = command.split(/\s+/);
   const cmd = parts[0];
+  const rawArgs = command.slice(cmd.length).trim();
 
   switch (cmd) {
     case 'clear':
@@ -340,6 +399,13 @@ async function handleCommand(chatJid: string, command: string): Promise<string |
     case 'recall':
     case 'rc':
       return handleRecallCommand(chatJid);
+    case 'where':
+      return handleWhereCommand(chatJid);
+    case 'unbind':
+      return handleUnbindCommand(chatJid);
+    case 'bind':
+    case 'switch':
+      return handleBindCommand(chatJid, rawArgs);
     default:
       return null;
   }
@@ -393,6 +459,40 @@ function collectWorkspaces(userId: string): WorkspaceInfo[] {
   }
 
   return workspaces;
+}
+
+function resolveBindingTarget(
+  userId: string,
+  rawSpec: string,
+): { target_agent_id?: string; target_main_jid?: string; display: string } | null {
+  const spec = rawSpec.trim();
+  if (!spec) return null;
+
+  const [workspaceSpecRaw, agentSpecRaw] = spec.split('/', 2);
+  const workspaceSpec = workspaceSpecRaw.trim().toLowerCase();
+  const agentSpec = agentSpecRaw?.trim().toLowerCase();
+  const workspaces = collectWorkspaces(userId);
+  const workspace = workspaces.find((ws) =>
+    ws.folder.toLowerCase() === workspaceSpec || ws.name.trim().toLowerCase() === workspaceSpec,
+  );
+  if (!workspace) return null;
+
+  if (!agentSpec || agentSpec === 'main' || agentSpec === '主对话') {
+    return {
+      target_main_jid: `web:${workspace.folder}`,
+      display: `${workspace.name} / 主对话`,
+    };
+  }
+
+  const agent = workspace.agents.find((item) =>
+    item.id.toLowerCase().startsWith(agentSpec) || item.name.trim().toLowerCase() === agentSpec,
+  );
+  if (!agent) return null;
+
+  return {
+    target_agent_id: agent.id,
+    display: `${workspace.name} / ${agent.name}`,
+  };
 }
 
 /**
@@ -452,7 +552,7 @@ function handleListCommand(chatJid: string): string {
   const workspaces = collectWorkspaces(userId);
   if (workspaces.length === 0) return '没有可用的工作区';
 
-  return formatWorkspaceList(workspaces, group.folder, null);
+  return formatWorkspaceList(workspaces, group.folder, null) + '\n💡 使用 /bind <workspace> 或 /bind <workspace>/<agent短ID>';
 }
 
 function handleStatusCommand(chatJid: string): string {
@@ -468,6 +568,60 @@ function handleStatusCommand(chatJid: string): string {
   ];
 
   return lines.join('\n');
+}
+
+function handleWhereCommand(chatJid: string): string {
+  const group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
+  if (!group) return '当前 IM 未绑定工作区';
+
+  const policySuffix = `\n🔁 回复策略: ${group.reply_policy || 'source_only'}`;
+
+  if (group.target_agent_id) {
+    const agent = getAgent(group.target_agent_id);
+    const parent = agent ? (registeredGroups[agent.chat_jid] ?? getRegisteredGroup(agent.chat_jid)) : null;
+    const workspaceName = parent?.name || parent?.folder || group.folder;
+    return `📍 当前绑定: ${workspaceName} / ${agent?.name || group.target_agent_id}${policySuffix}`;
+  }
+
+  if (group.target_main_jid) {
+    const target = registeredGroups[group.target_main_jid] ?? getRegisteredGroup(group.target_main_jid);
+    return `📍 当前绑定: ${(target?.name || group.target_main_jid)} / 主对话${policySuffix}`;
+  }
+
+  return `📍 当前绑定: ${group.name} / 主对话${policySuffix}`;
+}
+
+function handleUnbindCommand(chatJid: string): string {
+  const group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
+  if (!group) return '当前 IM 未绑定工作区';
+  if (!group.target_agent_id && !group.target_main_jid) return '当前聊天没有额外绑定，已在默认工作区。';
+  unbindImGroup(chatJid, 'IM slash command unbind');
+  return '已解绑，后续消息将回到该聊天自己的默认工作区。';
+}
+
+function handleBindCommand(chatJid: string, rawSpec: string): string {
+  const group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
+  if (!group) return '当前 IM 未绑定工作区';
+  const userId = group.created_by;
+  if (!userId) return '无法确定当前聊天所属用户';
+  if (!rawSpec) return '用法: /bind <workspace> 或 /bind <workspace>/<agent短ID>';
+
+  const resolved = resolveBindingTarget(userId, rawSpec);
+  if (!resolved) {
+    return '未找到目标。先用 /list 查看工作区和 agent 短 ID，再执行 /bind <workspace>/<agent短ID>';
+  }
+
+  const updated: RegisteredGroup = {
+    ...group,
+    target_agent_id: resolved.target_agent_id,
+    target_main_jid: resolved.target_main_jid,
+    reply_policy: 'source_only',
+  };
+  setRegisteredGroup(chatJid, updated);
+  registeredGroups[chatJid] = updated;
+  imSendFailCounts.delete(chatJid);
+  imHealthCheckFailCounts.delete(chatJid);
+  return `已切换到 ${resolved.display}\n🔁 回复策略: source_only`;
 }
 
 const recallCooldowns = new Map<string, number>();
@@ -579,6 +733,8 @@ async function setTyping(jid: string, isTyping: boolean): Promise<void> {
 interface SendMessageOptions {
   /** Whether to forward the reply to the IM channel (Feishu/Telegram). Defaults to true for IM JIDs. */
   sendToIM?: boolean;
+  /** Pre-computed local image paths to attach to IM messages. Avoids redundant filesystem scans. */
+  localImagePaths?: string[];
 }
 
 function loadState(): void {
@@ -892,10 +1048,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }
   }
 
-  // Reply routing: IM JIDs reply to their respective IM channel.
-  // With the home-folder forced restart in the message loop, each JID gets its
-  // own processGroupMessages call, so JID-based routing is always correct.
-  const shouldReplyToIM = getChannelType(chatJid) !== null;
+  // Direct IM chats reply to themselves. Routed IM messages keep their original
+  // source_jid so workspace-bound conversations can reply back to the sender
+  // without mirroring every Web reply into IM.
+  const latestSourceJid = missedMessages[missedMessages.length - 1]?.source_jid || chatJid;
+  const directImReply = getChannelType(chatJid) !== null;
+  const replySourceImJid = getChannelType(latestSourceJid) ? latestSourceJid : null;
 
   const shared = isGroupShared(group.folder);
   const prompt = formatMessages(missedMessages, shared);
@@ -907,7 +1065,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     {
       group: group.name,
       messageCount: missedMessages.length,
-      shouldReplyToIM,
+      directImReply,
       imageCount: images.length,
       shared,
     },
@@ -984,12 +1142,13 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
               queryTaskIds.add(taskId);
               const existing = getAgent(taskId);
               const desc = se.taskDescription || se.toolInputSummary || '';
+              const taskName = desc.slice(0, 40) || existing?.name || 'Task';
               if (!existing) {
                 createAgent({
                   id: taskId,
                   group_folder: group.folder,
                   chat_jid: chatJid,
-                  name: desc.slice(0, 40) || 'Task',
+                  name: taskName,
                   prompt: desc,
                   status: 'running',
                   kind: 'task',
@@ -1001,6 +1160,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
               } else if (se.taskDescription) {
                 updateAgentInfo(taskId, se.taskDescription.slice(0, 40), se.taskDescription);
               }
+              broadcastAgentStatus(chatJid, taskId, 'running', taskName, desc, undefined, 'task');
             } catch (err) {
               logger.warn({ err, toolUseId: se.toolUseId }, 'Failed to persist task_start to DB');
             }
@@ -1010,6 +1170,16 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
               const existing = getAgent(se.toolUseId);
               if (existing && existing.kind === 'task' && existing.status === 'running') {
                 updateAgentStatus(se.toolUseId, 'completed');
+                queryTaskIds.delete(existing.id);
+                broadcastAgentStatus(
+                  chatJid,
+                  existing.id,
+                  'completed',
+                  existing.name,
+                  existing.prompt,
+                  existing.result_summary || '任务已完成',
+                  'task',
+                );
               }
             } catch (err) {
               logger.warn({ err, toolUseId: se.toolUseId }, 'Failed to persist tool_use_end to DB');
@@ -1047,9 +1217,19 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
                   completed_at: new Date().toISOString(),
                   result_summary: summary || null,
                 });
+                broadcastAgentStatus(chatJid, targetTaskId, status, 'Task', '', summary, 'task');
               } else if (existing.kind === 'task') {
                 updateAgentStatus(existing.id, status, summary);
                 queryTaskIds.delete(existing.id);
+                broadcastAgentStatus(
+                  chatJid,
+                  existing.id,
+                  status,
+                  existing.name,
+                  existing.prompt,
+                  summary,
+                  'task',
+                );
               }
             } catch (err) {
               logger.warn({ err, taskId: se.taskId }, 'Failed to persist task_notification to DB');
@@ -1088,15 +1268,22 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             // Stop typing indicator before sending — clears the 4s refresh timer
             // so it doesn't keep firing while the agent stays alive in idle state.
             await setTyping(chatJid, false);
+            const localImagePaths = extractLocalImImagePaths(text, effectiveGroup.folder);
             lastReplyMsgId = await sendMessage(chatJid, text, {
-              sendToIM: shouldReplyToIM,
+              sendToIM: directImReply,
+              localImagePaths,
             });
 
-            // Relay to IM channels bound to this workspace's main conversation
+            if (replySourceImJid && replySourceImJid !== chatJid) {
+              sendImWithFailTracking(replySourceImJid, text, localImagePaths);
+            }
+
+            // Optional mirror mode for explicitly bound IM channels
             const webJid = `web:${effectiveGroup.folder}`;
             for (const [imJid, g] of Object.entries(registeredGroups)) {
-              if (g.target_main_jid !== webJid || imJid === chatJid) continue;
-              if (getChannelType(imJid)) sendImWithFailTracking(imJid, text);
+              if (g.target_main_jid !== webJid || imJid === chatJid || imJid === replySourceImJid) continue;
+              if (g.reply_policy !== 'mirror') continue;
+              if (getChannelType(imJid)) sendImWithFailTracking(imJid, text, localImagePaths);
             }
 
             sentReply = true;
@@ -1463,7 +1650,8 @@ async function sendMessage(
   try {
     if (sendToIM && isIMChannel) {
       try {
-        await imManager.sendMessage(jid, text);
+        const localImagePaths = options.localImagePaths ?? extractLocalImImagePaths(text, resolveEffectiveFolder(jid));
+        await imManager.sendMessage(jid, text, localImagePaths);
       } catch (err) {
         logger.error({ jid, err }, 'Failed to send message to IM channel');
       }
@@ -2113,6 +2301,8 @@ async function processAgentConversation(chatJid: string, agentId: string): Promi
   const prompt = formatMessages(missedMessages, false);
   const images = collectMessageImages(virtualChatJid, missedMessages);
   const imagesForAgent = images.length > 0 ? images : undefined;
+  const latestSourceJid = missedMessages[missedMessages.length - 1]?.source_jid || virtualChatJid;
+  const replySourceImJid = getChannelType(latestSourceJid) ? latestSourceJid : null;
 
   // Track idle timer
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -2185,10 +2375,16 @@ async function processAgentConversation(chatJid: string, agentId: string): Promi
           is_from_me: true,
         }, agentId);
 
-        // Send reply to linked IM channels (Feishu/Telegram groups with target_agent_id)
+        const localImagePaths = extractLocalImImagePaths(text, effectiveGroup.folder);
+        if (replySourceImJid) {
+          sendImWithFailTracking(replySourceImJid, text, localImagePaths);
+        }
+
+        // Optional mirror mode for linked IM channels
         for (const [imJid, g] of Object.entries(registeredGroups)) {
-          if (g.target_agent_id !== agentId) continue;
-          if (getChannelType(imJid)) sendImWithFailTracking(imJid, text);
+          if (g.target_agent_id !== agentId || imJid === replySourceImJid) continue;
+          if (g.reply_policy !== 'mirror') continue;
+          if (getChannelType(imJid)) sendImWithFailTracking(imJid, text, localImagePaths);
         }
 
         commitCursor();

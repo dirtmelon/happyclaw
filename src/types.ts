@@ -49,6 +49,7 @@ export interface RegisteredGroup {
   selected_skills?: string[] | null; // null = 全部启用
   target_agent_id?: string; // IM 消息路由到指定 conversation agent
   target_main_jid?: string; // IM 消息路由到指定工作区的主对话（web:{folder}）
+  reply_policy?: 'source_only' | 'mirror'; // IM 绑定的回复策略
 }
 
 export interface GroupMember {
@@ -63,6 +64,7 @@ export interface GroupMember {
 export interface NewMessage {
   id: string;
   chat_jid: string;
+  source_jid?: string;
   sender: string;
   sender_name: string;
   content: string;
@@ -304,6 +306,23 @@ export type WsMessageOut =
       name: string;
       prompt: string;
       resultSummary?: string;
+    }
+  | {
+      type: 'runner_state';
+      chatJid: string;
+      state: 'idle' | 'running' | 'interrupting' | 'interrupted' | 'closing' | 'error';
+      agentId?: string;
+      detail?: string;
+    }
+  | {
+      type: 'task_state';
+      chatJid: string;
+      taskId: string;
+      status: 'running' | 'completed' | 'error';
+      name: string;
+      prompt: string;
+      resultSummary?: string;
+      kind?: AgentKind;
     }
   | { type: 'terminal_output'; chatJid: string; data: string }
   | { type: 'terminal_started'; chatJid: string }

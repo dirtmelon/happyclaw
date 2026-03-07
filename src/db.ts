@@ -101,6 +101,7 @@ export function initDatabase(): void {
     CREATE TABLE IF NOT EXISTS messages (
       id TEXT,
       chat_jid TEXT,
+      source_jid TEXT,
       sender TEXT,
       sender_name TEXT,
       content TEXT,
@@ -284,6 +285,7 @@ export function initDatabase(): void {
   ensureColumn('registered_groups', 'init_source_path', 'TEXT');
   ensureColumn('registered_groups', 'init_git_url', 'TEXT');
   ensureColumn('messages', 'attachments', 'TEXT');
+  ensureColumn('messages', 'source_jid', 'TEXT');
   ensureColumn('registered_groups', 'created_by', 'TEXT');
   ensureColumn('registered_groups', 'is_home', 'INTEGER DEFAULT 0');
   ensureColumn('users', 'ai_name', 'TEXT');
@@ -298,6 +300,8 @@ export function initDatabase(): void {
   ensureColumn('agents', 'kind', "TEXT NOT NULL DEFAULT 'task'");
   ensureColumn('registered_groups', 'target_agent_id', 'TEXT');
   ensureColumn('registered_groups', 'target_main_jid', 'TEXT');
+  ensureColumn('registered_groups', 'reply_policy', "TEXT DEFAULT 'source_only'");
+  ensureColumn('messages', 'token_usage', 'TEXT');
 
   // Add index on target_agent_id for fast lookup of IM bindings
   db.exec('CREATE INDEX IF NOT EXISTS idx_rg_target_agent ON registered_groups(target_agent_id)');
@@ -342,6 +346,7 @@ export function initDatabase(): void {
   assertSchema('messages', [
     'id',
     'chat_jid',
+    'source_jid',
     'sender',
     'sender_name',
     'content',
@@ -350,8 +355,6 @@ export function initDatabase(): void {
     'attachments',
     'token_usage',
   ]);
-  // v19→v20 migration: add token_usage column to messages
-  ensureColumn('messages', 'token_usage', 'TEXT');
   assertSchema('scheduled_tasks', [
     'id',
     'group_folder',
@@ -384,6 +387,7 @@ export function initDatabase(): void {
       'selected_skills',
       'target_agent_id',
       'target_main_jid',
+      'reply_policy',
     ],
     ['trigger_pattern', 'requires_trigger'],
   );
@@ -645,12 +649,14 @@ export function storeMessageDirect(
   isFromMe: boolean,
   attachments?: string,
   tokenUsage?: string,
+  sourceJid?: string,
 ): void {
   db.prepare(
-    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO messages (id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     msgId,
     chatJid,
+    sourceJid ?? chatJid,
     sender,
     senderName,
     content,
@@ -885,7 +891,7 @@ export function getNewMessages(
   const placeholders = jids.map(() => '?').join(',');
   // Filter out assistant outputs.
   const sql = `
-    SELECT id, chat_jid, sender, sender_name, content, timestamp, attachments
+    SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, attachments
     FROM messages
     WHERE
       (timestamp > ? OR (timestamp = ? AND id > ?))
@@ -912,7 +918,7 @@ export function getMessagesSince(
 ): NewMessage[] {
   // Filter out assistant outputs.
   const sql = `
-    SELECT id, chat_jid, sender, sender_name, content, timestamp, attachments
+    SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, attachments
     FROM messages
     WHERE
       chat_jid = ?
@@ -1186,6 +1192,7 @@ type RegisteredGroupRow = {
   selected_skills: string | null;
   target_agent_id: string | null;
   target_main_jid: string | null;
+  reply_policy: string | null;
 };
 
 /** Convert a raw DB row into a RegisteredGroup domain object. */
@@ -1207,6 +1214,7 @@ function parseGroupRow(row: RegisteredGroupRow): RegisteredGroup & { jid: string
     selected_skills: row.selected_skills ? JSON.parse(row.selected_skills) : null,
     target_agent_id: row.target_agent_id ?? undefined,
     target_main_jid: row.target_main_jid ?? undefined,
+    reply_policy: row.reply_policy === 'mirror' ? 'mirror' : 'source_only',
   };
 }
 
@@ -1222,8 +1230,8 @@ export function getRegisteredGroup(
 
 export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
   db.prepare(
-    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, execution_mode, custom_cwd, init_source_path, init_git_url, created_by, is_home, selected_skills, target_agent_id, target_main_jid)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, execution_mode, custom_cwd, init_source_path, init_git_url, created_by, is_home, selected_skills, target_agent_id, target_main_jid, reply_policy)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     jid,
     group.name,
@@ -1239,6 +1247,7 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
     group.selected_skills ? JSON.stringify(group.selected_skills) : null,
     group.target_agent_id ?? null,
     group.target_main_jid ?? null,
+    group.reply_policy ?? 'source_only',
   );
 }
 
@@ -1442,14 +1451,14 @@ export function getMessagesPage(
 ): Array<NewMessage & { is_from_me: boolean }> {
   const sql = before
     ? `
-      SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me, attachments
+      SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments
       FROM messages
       WHERE chat_jid = ? AND timestamp < ?
       ORDER BY timestamp DESC
       LIMIT ?
     `
     : `
-      SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me, attachments
+      SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments
       FROM messages
       WHERE chat_jid = ?
       ORDER BY timestamp DESC
@@ -1478,7 +1487,7 @@ export function getMessagesAfter(
 ): Array<NewMessage & { is_from_me: boolean }> {
   const rows = db
     .prepare(
-      `SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me, attachments
+      `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments
        FROM messages
        WHERE chat_jid = ? AND timestamp > ?
        ORDER BY timestamp ASC
@@ -1505,12 +1514,12 @@ export function getMessagesPageMulti(
 
   const placeholders = chatJids.map(() => '?').join(',');
   const sql = before
-    ? `SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me, attachments
+    ? `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments
        FROM messages
        WHERE chat_jid IN (${placeholders}) AND timestamp < ?
        ORDER BY timestamp DESC
        LIMIT ?`
-    : `SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me, attachments
+    : `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments
        FROM messages
        WHERE chat_jid IN (${placeholders})
        ORDER BY timestamp DESC
@@ -1543,7 +1552,7 @@ export function getMessagesAfterMulti(
   const placeholders = chatJids.map(() => '?').join(',');
   const rows = db
     .prepare(
-      `SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me, attachments
+      `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments
        FROM messages
        WHERE chat_jid IN (${placeholders}) AND timestamp > ?
        ORDER BY timestamp ASC
@@ -1589,7 +1598,7 @@ export function getMessagesByTimeRange(
   const endIso = new Date(endTs).toISOString();
   const rows = db
     .prepare(
-      `SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me, attachments
+      `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments
        FROM messages
        WHERE chat_jid = ? AND timestamp >= ? AND timestamp < ?
        ORDER BY timestamp ASC

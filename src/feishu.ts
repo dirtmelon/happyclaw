@@ -1,3 +1,4 @@
+import fs from 'fs';
 import * as lark from '@larksuiteoapi/node-sdk';
 import {
   setLastGroupSync,
@@ -58,7 +59,7 @@ export interface FeishuChatInfo {
 export interface FeishuConnection {
   connect(opts: ConnectOptions): Promise<boolean>;
   stop(): Promise<void>;
-  sendMessage(chatId: string, text: string): Promise<void>;
+  sendMessage(chatId: string, text: string, localImagePaths?: string[]): Promise<void>;
   sendReaction(chatId: string, isTyping: boolean): Promise<void>;
   isConnected(): boolean;
   syncGroups(): Promise<void>;
@@ -122,8 +123,9 @@ function extractMessageContent(
     }
 
     if (messageType === 'post') {
-      // Extract text from post content (images in post messages are not supported)
+      // Extract text and inline images from rich post content.
       const lines: string[] = [];
+      const imageKeys: string[] = [];
       const post = parsed.post;
       if (!post) return { text: '' };
 
@@ -133,16 +135,39 @@ function extractMessageContent(
 
       for (const paragraph of contentData.content) {
         if (!Array.isArray(paragraph)) continue;
+        const parts: string[] = [];
         for (const segment of paragraph) {
-          if (segment.tag === 'text' && segment.text) {
-            lines.push(segment.text);
-          } else if (segment.tag === 'a' && segment.text) {
-            lines.push(segment.text);
+          if (!segment || typeof segment !== 'object') continue;
+          if (segment.tag === 'text' && typeof segment.text === 'string') {
+            parts.push(segment.text);
+          } else if (segment.tag === 'a' && typeof segment.text === 'string') {
+            parts.push(segment.text);
+          } else if (segment.tag === 'at') {
+            const mentionName =
+              typeof segment.user_name === 'string'
+                ? segment.user_name
+                : typeof segment.text === 'string'
+                  ? segment.text
+                  : typeof segment.name === 'string'
+                    ? segment.name
+                    : '用户';
+            parts.push(`@${mentionName}`);
+          } else if (segment.tag === 'img' && typeof segment.image_key === 'string') {
+            imageKeys.push(segment.image_key);
+            parts.push('[图片]');
+          } else if (segment.tag === 'emotion' && typeof segment.emoji_type === 'string') {
+            parts.push(`:${segment.emoji_type}:`);
+          } else if (typeof segment.text === 'string') {
+            parts.push(segment.text);
           }
         }
+        if (parts.length > 0) lines.push(parts.join(''));
       }
 
-      return { text: lines.join('\n') };
+      return {
+        text: lines.join('\n'),
+        imageKeys: imageKeys.length > 0 ? imageKeys : undefined,
+      };
     }
 
     if (messageType === 'image') {
@@ -669,10 +694,13 @@ export function createFeishuConnection(config: FeishuConnectionConfig): FeishuCo
       timestamp,
       false,
       attachmentsJson,
+      undefined,
+      chatJid,
     );
     broadcastNewMessage(targetJid, {
       id: messageId,
       chat_jid: targetJid,
+      source_jid: chatJid,
       sender: senderOpenId,
       sender_name: resolvedSenderName,
       content: text,
@@ -1015,7 +1043,7 @@ export function createFeishuConnection(config: FeishuConnectionConfig): FeishuCo
       lastWsStateConnected = false;
     },
 
-    async sendMessage(chatId: string, text: string): Promise<void> {
+    async sendMessage(chatId: string, text: string, localImagePaths?: string[]): Promise<void> {
       if (!client) {
         logger.warn(
           { chatId },
@@ -1084,6 +1112,32 @@ export function createFeishuConnection(config: FeishuConnectionConfig): FeishuCo
         }
         logger.debug({ chatId }, 'Sent Feishu card message');
         clearAckReaction();
+
+        for (const localImagePath of localImagePaths || []) {
+          try {
+            const uploadRes = await client.im.v1.image.create({
+              data: {
+                image_type: 'message',
+                image: fs.createReadStream(localImagePath),
+              },
+            }) as { data?: { image_key?: string } } | null;
+            const imageKey = uploadRes?.data?.image_key;
+            if (!imageKey) {
+              logger.warn({ chatId, localImagePath }, 'Feishu image upload returned no image_key');
+              continue;
+            }
+            await client.im.v1.message.create({
+              params: { receive_id_type: 'chat_id' },
+              data: {
+                receive_id: chatId,
+                msg_type: 'image',
+                content: JSON.stringify({ image_key: imageKey }),
+              },
+            });
+          } catch (imageErr) {
+            logger.warn({ chatId, localImagePath, err: imageErr }, 'Failed to send Feishu image attachment');
+          }
+        }
       } catch (err) {
         logger.error({ err, chatId }, 'Failed to send Feishu card message');
         clearAckReaction();
@@ -1217,6 +1271,7 @@ export async function connectFeishu(opts: ConnectFeishuOptions): Promise<boolean
 export async function sendFeishuMessage(
   chatId: string,
   text: string,
+  localImagePaths?: string[],
 ): Promise<void> {
   if (!_defaultInstance) {
     logger.warn(
@@ -1225,7 +1280,7 @@ export async function sendFeishuMessage(
     );
     return;
   }
-  return _defaultInstance.sendMessage(chatId, text);
+  return _defaultInstance.sendMessage(chatId, text, localImagePaths);
 }
 
 /**

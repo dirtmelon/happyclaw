@@ -104,7 +104,7 @@ class IMConnectionManager {
    * Resolves the user by looking up chatJid -> registered_groups.created_by.
    * Falls back to iterating sibling groups if no created_by is set.
    */
-  async sendMessage(jid: string, text: string): Promise<void> {
+  async sendMessage(jid: string, text: string, localImagePaths?: string[]): Promise<void> {
     const channelType = getChannelType(jid);
     if (!channelType) {
       logger.debug({ jid }, 'Unknown channel type for JID, skip sending');
@@ -114,7 +114,7 @@ class IMConnectionManager {
     const chatId = extractChatId(jid);
     const channel = this.findChannelForJid(jid, channelType);
     if (channel) {
-      await channel.sendMessage(chatId, text);
+      await channel.sendMessage(chatId, text, localImagePaths);
       return;
     }
 
@@ -254,11 +254,11 @@ class IMConnectionManager {
    * Send a message to a Feishu chat.
    * @deprecated Use sendMessage(jid, text) which auto-routes.
    */
-  async sendFeishuMessage(chatJid: string, text: string): Promise<void> {
+  async sendFeishuMessage(chatJid: string, text: string, localImagePaths?: string[]): Promise<void> {
     const chatId = extractChatId(chatJid);
     const channel = this.findChannelForJid(chatJid, 'feishu');
     if (channel) {
-      await channel.sendMessage(chatId, text);
+      await channel.sendMessage(chatId, text, localImagePaths);
       return;
     }
     logger.warn({ chatJid }, 'No Feishu connection available to send message');
@@ -268,11 +268,11 @@ class IMConnectionManager {
    * Send a message to a Telegram chat.
    * @deprecated Use sendMessage(jid, text) which auto-routes.
    */
-  async sendTelegramMessage(chatJid: string, text: string): Promise<void> {
+  async sendTelegramMessage(chatJid: string, text: string, localImagePaths?: string[]): Promise<void> {
     const chatId = extractChatId(chatJid);
     const channel = this.findChannelForJid(chatJid, 'telegram');
     if (channel) {
-      await channel.sendMessage(chatId, text);
+      await channel.sendMessage(chatId, text, localImagePaths);
       return;
     }
     logger.warn({ chatJid }, 'No Telegram connection available to send message');

@@ -37,6 +37,7 @@ export interface AvailableImGroup {
   bound_main_jid: string | null;
   bound_target_name: string | null;
   bound_workspace_name: string | null;
+  reply_policy?: 'source_only' | 'mirror';
   avatar?: string;
   member_count?: number;
   channel_type: string;

@@ -1,4 +1,4 @@
-import { Bot } from 'grammy';
+import { Bot, InputFile } from 'grammy';
 import crypto from 'crypto';
 import https from 'node:https';
 import { Agent as HttpsAgent } from 'node:https';
@@ -41,7 +41,7 @@ export interface TelegramConnectOpts {
 export interface TelegramConnection {
   connect(opts: TelegramConnectOpts): Promise<void>;
   disconnect(): Promise<void>;
-  sendMessage(chatId: string, text: string): Promise<void>;
+  sendMessage(chatId: string, text: string, localImagePaths?: string[]): Promise<void>;
   sendChatAction(chatId: string, action: 'typing'): Promise<void>;
   isConnected(): boolean;
 }
@@ -668,7 +668,7 @@ export function createTelegramConnection(config: TelegramConnectionConfig): Tele
       }
     },
 
-    async sendMessage(chatId: string, text: string): Promise<void> {
+    async sendMessage(chatId: string, text: string, localImagePaths?: string[]): Promise<void> {
       if (!bot) {
         logger.warn(
           { chatId },
@@ -695,6 +695,14 @@ export function createTelegramConnection(config: TelegramConnectionConfig): Tele
             // HTML parse failed (e.g. unclosed tags), fallback to plain text
             logger.debug({ err, chatId }, 'HTML parse failed, fallback to plain');
             await bot.api.sendMessage(chatIdNum, mdChunk);
+          }
+        }
+
+        for (const localImagePath of localImagePaths || []) {
+          try {
+            await bot.api.sendPhoto(chatIdNum, new InputFile(localImagePath));
+          } catch (imageErr) {
+            logger.warn({ chatId, localImagePath, err: imageErr }, 'Failed to send Telegram image attachment');
           }
         }
 
@@ -757,6 +765,7 @@ export async function connectTelegram(
 export async function sendTelegramMessage(
   chatId: string,
   text: string,
+  localImagePaths?: string[],
 ): Promise<void> {
   if (!_defaultInstance) {
     logger.warn(
@@ -765,7 +774,7 @@ export async function sendTelegramMessage(
     );
     return;
   }
-  return _defaultInstance.sendMessage(chatId, text);
+  return _defaultInstance.sendMessage(chatId, text, localImagePaths);
 }
 
 /**
