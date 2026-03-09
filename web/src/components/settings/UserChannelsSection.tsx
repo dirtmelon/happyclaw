@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button';
 import { api } from '../../api/client';
 import type { SettingsNotification } from './types';
 import { getErrorMessage } from './types';
+import { QQSection } from './QQSection';
 
 interface UserFeishuConfig {
   appId: string;
@@ -427,6 +428,15 @@ export function UserChannelsSection({ setNotice, setError }: UserChannelsSection
             )}
           </>
         )}
+      </div>
+
+      {/* Divider */}
+      <div className="border-t border-slate-200" />
+
+      {/* QQ */}
+      <div>
+        <h3 className="text-base font-semibold text-slate-900 mb-3">QQ</h3>
+        <QQSection setNotice={setNotice} setError={setError} />
       </div>
     </div>
   );

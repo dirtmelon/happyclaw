@@ -591,7 +591,9 @@ function toStoredProfile(
       claudeCodeOauthToken: '',
       claudeOAuthCredentials: null,
     }),
-    ...(Object.keys(sanitizedEnv).length > 0 ? { customEnv: sanitizedEnv } : {}),
+    ...(Object.keys(sanitizedEnv).length > 0
+      ? { customEnv: sanitizedEnv }
+      : {}),
   };
 }
 
@@ -708,9 +710,7 @@ function normalizeStoredState(
               };
             }
           }
-          logger.info(
-            'Migrated legacy global customEnv to active profile',
-          );
+          logger.info('Migrated legacy global customEnv to active profile');
         }
       }
     } catch (err) {
@@ -1189,7 +1189,6 @@ export function toPublicTelegramProviderConfig(
   };
 }
 
-
 function maskSecret(value: string): string | null {
   if (!value) return null;
   if (value.length <= 8)
@@ -1539,7 +1538,9 @@ export function updateClaudeThirdPartyProfile(
         : decoded.happyclawModel,
     customEnv:
       patch.customEnv !== undefined
-        ? sanitizeCustomEnvMap(patch.customEnv, { skipReservedClaudeKeys: true })
+        ? sanitizeCustomEnvMap(patch.customEnv, {
+            skipReservedClaudeKeys: true,
+          })
         : decoded.customEnv,
     updatedAt: new Date().toISOString(),
   };
@@ -1749,7 +1750,6 @@ export function getActiveProfileCustomEnv(): Record<string, string> {
     skipReservedClaudeKeys: true,
   });
 }
-
 
 export function saveOfficialCustomEnv(
   customEnv: Record<string, string>,
@@ -2367,6 +2367,25 @@ export interface UserTelegramConfig {
   updatedAt: string | null;
 }
 
+export interface UserQQConfig {
+  appId: string;
+  appSecret: string;
+  enabled?: boolean;
+  updatedAt: string | null;
+}
+
+interface StoredQQProviderConfigV1 {
+  version: 1;
+  appId: string;
+  enabled?: boolean;
+  updatedAt: string;
+  secret: EncryptedSecrets;
+}
+
+interface QQSecretPayload {
+  appSecret: string;
+}
+
 function userImDir(userId: string): string {
   if (!/^[a-zA-Z0-9_-]+$/.test(userId)) {
     throw new Error('Invalid userId');
@@ -2467,6 +2486,93 @@ export function saveUserTelegramConfig(
   const dir = userImDir(userId);
   fs.mkdirSync(dir, { recursive: true });
   const filePath = path.join(dir, 'telegram.json');
+  const tmp = `${filePath}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(payload, null, 2) + '\n', 'utf-8');
+  fs.renameSync(tmp, filePath);
+  return normalized;
+}
+
+// ========== QQ User IM Config ==========
+
+function encryptQQSecret(payload: QQSecretPayload): EncryptedSecrets {
+  const key = getOrCreateEncryptionKey();
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+
+  const plaintext = Buffer.from(JSON.stringify(payload), 'utf-8');
+  const encrypted = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+  const tag = cipher.getAuthTag();
+
+  return {
+    iv: iv.toString('base64'),
+    tag: tag.toString('base64'),
+    data: encrypted.toString('base64'),
+  };
+}
+
+function decryptQQSecret(secrets: EncryptedSecrets): QQSecretPayload {
+  const key = getOrCreateEncryptionKey();
+  const iv = Buffer.from(secrets.iv, 'base64');
+  const tag = Buffer.from(secrets.tag, 'base64');
+  const encrypted = Buffer.from(secrets.data, 'base64');
+
+  const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+  decipher.setAuthTag(tag);
+
+  const decrypted = Buffer.concat([
+    decipher.update(encrypted),
+    decipher.final(),
+  ]).toString('utf-8');
+  const parsed = JSON.parse(decrypted) as Record<string, unknown>;
+  return {
+    appSecret: normalizeSecret(parsed.appSecret ?? '', 'appSecret'),
+  };
+}
+
+export function getUserQQConfig(userId: string): UserQQConfig | null {
+  const filePath = path.join(userImDir(userId), 'qq.json');
+  try {
+    if (!fs.existsSync(filePath)) return null;
+    const content = fs.readFileSync(filePath, 'utf-8');
+    const parsed = JSON.parse(content) as Record<string, unknown>;
+    if (parsed.version !== 1) return null;
+
+    const stored = parsed as unknown as StoredQQProviderConfigV1;
+    const secret = decryptQQSecret(stored.secret);
+    return {
+      appId: normalizeFeishuAppId(stored.appId ?? ''),
+      appSecret: secret.appSecret,
+      enabled: stored.enabled,
+      updatedAt: stored.updatedAt || null,
+    };
+  } catch (err) {
+    logger.warn({ err, userId }, 'Failed to read user QQ config');
+    return null;
+  }
+}
+
+export function saveUserQQConfig(
+  userId: string,
+  next: Omit<UserQQConfig, 'updatedAt'>,
+): UserQQConfig {
+  const normalized: UserQQConfig = {
+    appId: normalizeFeishuAppId(next.appId),
+    appSecret: normalizeSecret(next.appSecret, 'appSecret'),
+    enabled: next.enabled,
+    updatedAt: new Date().toISOString(),
+  };
+
+  const payload: StoredQQProviderConfigV1 = {
+    version: 1,
+    appId: normalized.appId,
+    enabled: normalized.enabled,
+    updatedAt: normalized.updatedAt || new Date().toISOString(),
+    secret: encryptQQSecret({ appSecret: normalized.appSecret }),
+  };
+
+  const dir = userImDir(userId);
+  fs.mkdirSync(dir, { recursive: true });
+  const filePath = path.join(dir, 'qq.json');
   const tmp = `${filePath}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(payload, null, 2) + '\n', 'utf-8');
   fs.renameSync(tmp, filePath);

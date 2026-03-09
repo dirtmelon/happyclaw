@@ -6,9 +6,9 @@
 
 HappyClaw 是一个自托管的多用户 AI Agent 系统：
 
-- **输入**：飞书 / Telegram / Web 界面消息（每个用户可独立配置 IM 通道）
+- **输入**：飞书 / Telegram / QQ / Web 界面消息（每个用户可独立配置 IM 通道）
 - **执行**：Docker 容器或宿主机进程中运行 Claude Agent（基于 Claude Agent SDK），每个用户拥有独立主容器
-- **输出**：飞书富文本卡片 / Telegram HTML / Web 实时流式推送
+- **输出**：飞书富文本卡片 / Telegram HTML / QQ 纯文本 / Web 实时流式推送
 - **记忆**：Agent 自主维护 `CLAUDE.md` 和工作区文件，实现跨会话持久记忆
 
 ## 2. 核心架构
@@ -22,7 +22,7 @@ HappyClaw 是一个自托管的多用户 AI Agent 系统：
 | `src/routes/auth.ts` | 认证：登录 / 登出 / 注册、`GET /api/auth/me`（含 `setupStatus`）、设置向导、RBAC、邀请码 |
 | `src/routes/groups.ts` | 群组 CRUD、消息分页、会话重置（重建工作区）、群组级容器环境变量 |
 | `src/routes/files.ts` | 文件上传（50MB 限制）/ 下载 / 删除、目录管理、路径遍历防护 |
-| `src/routes/config.ts` | Claude / 飞书配置（AES-256-GCM 加密存储）、连通性测试、批量应用到所有容器、per-user IM 通道配置（`/api/config/user-im/feishu`、`/api/config/user-im/telegram`） |
+| `src/routes/config.ts` | Claude / 飞书配置（AES-256-GCM 加密存储）、连通性测试、批量应用到所有容器、per-user IM 通道配置（`/api/config/user-im/feishu`、`/api/config/user-im/telegram`、`/api/config/user-im/qq`） |
 | `src/routes/monitor.ts` | 系统状态：容器列表、队列状态、健康检查（`GET /api/health` 无需认证） |
 | `src/routes/memory.ts` | 记忆文件读写（`groups/global/` + `groups/{folder}/`）、全文检索 |
 | `src/routes/tasks.ts` | 定时任务 CRUD + 执行日志查询 |
@@ -33,8 +33,9 @@ HappyClaw 是一个自托管的多用户 AI Agent 系统：
 | `src/routes/mcp-servers.ts` | MCP Servers 管理（CRUD + `POST /api/mcp-servers/sync-host`，per-user） |
 | `src/feishu.ts` | 飞书连接工厂（`createFeishuConnection`）：WebSocket 长连接、消息去重（LRU 1000 条 / 30min TTL）、富文本卡片、Reaction；`file` 消息下载到工作区；`post` 图文消息仅提取文字 |
 | `src/telegram.ts` | Telegram 连接工厂（`createTelegramConnection`）：Bot API Long Polling、Markdown → HTML 转换、长消息分片（3800 字符）；`message:photo` 下载为 base64 供 Vision；`message:document` 下载文件到工作区 |
+| `src/qq.ts` | QQ 连接工厂（`createQQConnection`）：Bot API v2 WebSocket 长连接、OAuth Token 管理、C2C 私聊 + 群聊 @Bot、消息去重（LRU 1000 条 / 30min TTL）、Markdown → 纯文本、长消息分片（5000 字符）、图片下载为 base64 供 Vision |
 | `src/im-downloader.ts` | IM 文件下载工具：`saveDownloadedFile()` 将 Buffer 写入 `downloads/{channel}/{YYYY-MM-DD}/`，处理路径安全、文件名冲突和 50MB 限制 |
-| `src/im-manager.ts` | IM 连接池管理器（`IMConnectionManager`）：per-user 飞书/Telegram 连接管理、热重连、批量断开 |
+| `src/im-manager.ts` | IM 连接池管理器（`IMConnectionManager`）：per-user 飞书/Telegram/QQ 连接管理、热重连、批量断开 |
 | `src/container-runner.ts` | 容器生命周期：Docker run + 宿主机进程模式、卷挂载构建（isAdminHome 区分权限）、环境变量注入 |
 | `src/agent-output-parser.ts` | Agent 输出解析：OUTPUT_MARKER 流式输出解析、stdout/stderr 处理、进程生命周期回调（从 container-runner.ts 提取的共享逻辑） |
 | `src/group-queue.ts` | 并发控制：最大 20 容器 + 最大 5 宿主机进程、会话级队列、任务优先于消息、指数退避重试 |
@@ -253,8 +254,8 @@ StreamEvent 类型以 `shared/stream-event.ts` 为单一真相源，构建时通
 
 `IMConnectionManager`（`src/im-manager.ts`）管理 per-user 的 IM 连接：
 
-- 每个用户可独立配置飞书和 Telegram 连接（存储在 `data/config/user-im/{userId}/feishu.json` 和 `telegram.json`）
-- `feishu.ts` 和 `telegram.ts` 改为工厂模式（`createFeishuConnection()`、`createTelegramConnection()`），返回无状态的连接实例
+- 每个用户可独立配置飞书、Telegram 和 QQ 连接（存储在 `data/config/user-im/{userId}/feishu.json`、`telegram.json`、`qq.json`）
+- `feishu.ts`、`telegram.ts`、`qq.ts` 均为工厂模式（`createFeishuConnection()`、`createTelegramConnection()`、`createQQConnection()`），返回无状态的连接实例
 - 系统启动时 `loadState()` 遍历所有用户，加载已保存的 IM 配置并建立连接
 - 管理员的系统级飞书/Telegram 配置（`data/config/feishu-provider.json`）绑定到 admin 用户的连接
 - 收到 IM 消息时，通过 `onNewChat` 回调自动注册到该用户的主容器（`home-{userId}`）
@@ -299,7 +300,7 @@ StreamEvent 类型以 `shared/stream-event.ts` 为单一真相源，构建时通
 |------|-------|--------|
 | 主容器 folder | `main` | `home-{userId}` |
 | 执行模式 | `host`（宿主机） | `container`（Docker） |
-| IM 通道 | 独立的飞书/Telegram 连接 | 独立的飞书/Telegram 连接 |
+| IM 通道 | 独立的飞书/Telegram/QQ 连接 | 独立的飞书/Telegram/QQ 连接 |
 | 全局记忆写入 | 可读写 | 只读 |
 | 项目根目录挂载 | 读写 | 不可访问 |
 | 跨组 MCP 操作 | `register_group`、跨组任务管理 | 仅限自己的群组 |
@@ -357,6 +358,7 @@ data/
   config/container-env/{folder}.json       # 群组级环境变量覆盖
   config/user-im/{userId}/feishu.json      # 用户级飞书 IM 配置（AES-256-GCM 加密）
   config/user-im/{userId}/telegram.json    # 用户级 Telegram IM 配置（AES-256-GCM 加密）
+  config/user-im/{userId}/qq.json          # 用户级 QQ IM 配置（AES-256-GCM 加密）
   config/registration.json                 # 注册设置（开关、邀请码要求）
   config/session-secret.key                # 会话签名密钥（0600 权限）
   config/system-settings.json              # 系统运行参数（容器超时、并发限制等）
@@ -413,6 +415,11 @@ scripts/                      # 构建辅助脚本
 - `GET|PUT /api/config/user-im/feishu`（用户级飞书 IM 配置，每个用户独立）
 - `GET|PUT /api/config/user-im/telegram`（用户级 Telegram IM 配置）
 - `POST /api/config/user-im/telegram/test`（Telegram Bot Token 连通性测试）
+- `GET|PUT /api/config/user-im/qq`（用户级 QQ IM 配置）
+- `POST /api/config/user-im/qq/test`（QQ 凭据连通性测试）
+- `POST /api/config/user-im/qq/pairing-code`（生成 QQ 配对码）
+- `GET /api/config/user-im/qq/paired-chats`（已配对的 QQ 聊天列表）
+- `DELETE /api/config/user-im/qq/paired-chats/:jid`（移除 QQ 配对）
 
 ### 任务
 - `GET /api/tasks` · `POST /api/tasks` · `PATCH /api/tasks/:id` · `DELETE /api/tasks/:id`
@@ -456,7 +463,7 @@ scripts/                      # 构建辅助脚本
 
 ### 8.2 IM 自动注册
 
-未注册的飞书/Telegram 群组首次发消息时，通过 `onNewChat` 回调自动注册到该用户的主容器（`folder='home-{userId}'`，admin 则为 `folder='main'`）。支持多个 IM 群组映射到同一个 folder。
+未注册的飞书/Telegram/QQ 群组首次发消息时，通过 `onNewChat` 回调自动注册到该用户的主容器（`folder='home-{userId}'`，admin 则为 `folder='main'`）。支持多个 IM 群组映射到同一个 folder。QQ 通道需先通过配对码绑定（`/pair <code>`）。
 
 ### 8.3 无触发词
 
@@ -483,7 +490,7 @@ scripts/                      # 构建辅助脚本
 
 ### 8.6 回复路由
 
-主容器在 Web 与 IM 共用历史（通过 `normalizeHomeJid` 映射飞书/Telegram JID → `web:{folder}`）。IM 来源的消息回复到对应 IM 渠道，Web 来源的消息仅在 Web 展示。
+主容器在 Web 与 IM 共用历史（通过 `normalizeHomeJid` 映射飞书/Telegram/QQ JID → `web:{folder}`）。IM 来源的消息回复到对应 IM 渠道，Web 来源的消息仅在 Web 展示。
 
 ### 8.7 并发控制
 
@@ -512,7 +519,7 @@ scripts/                      # 构建辅助脚本
 
 ### 8.10 IM 通道热管理
 
-通过 `PUT /api/config/user-im/feishu` 或 `PUT /api/config/user-im/telegram` 更新 IM 配置后：
+通过 `PUT /api/config/user-im/feishu`、`PUT /api/config/user-im/telegram` 或 `PUT /api/config/user-im/qq` 更新 IM 配置后：
 - 保存配置到 `data/config/user-im/{userId}/` 目录（AES-256-GCM 加密）
 - 断开该用户的旧连接
 - 如果新配置有效（`enabled=true` 且凭据非空），立即建立新连接
@@ -520,7 +527,7 @@ scripts/                      # 构建辅助脚本
 
 ### 8.11 IM 斜杠命令
 
-飞书/Telegram 中以 `/` 开头的消息会被拦截为斜杠命令（未知命令继续作为普通消息处理）。命令在主服务进程的 `handleCommand()` 中分发，纯函数逻辑在 `im-command-utils.ts` 中（便于单测）。
+飞书/Telegram/QQ 中以 `/` 开头的消息会被拦截为斜杠命令（未知命令继续作为普通消息处理）。命令在主服务进程的 `handleCommand()` 中分发，纯函数逻辑在 `im-command-utils.ts` 中（便于单测）。
 
 | 命令 | 缩写 | 用途 |
 |------|------|------|
@@ -659,7 +666,7 @@ make help          # 列出所有可用的 make 命令
 
 ### 新增 IM 集成渠道
 
-1. 在 `src/` 目录下创建新的连接工厂模块（参考 `feishu.ts` 和 `telegram.ts` 的接口模式）
+1. 在 `src/` 目录下创建新的连接工厂模块（参考 `feishu.ts`、`telegram.ts`、`qq.ts` 的接口模式）
 2. 在 `src/im-manager.ts` 中添加 `connectUser{Channel}()` / `disconnectUser{Channel}()` 方法
 3. 在 `src/routes/config.ts` 中添加 `/api/config/user-im/{channel}` 路由（GET/PUT）
 4. 在 `src/index.ts` 的 `loadState()` 和 `connectUserIMChannels()` 中加载新渠道

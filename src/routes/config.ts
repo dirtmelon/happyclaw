@@ -16,6 +16,7 @@ import {
   ClaudeThirdPartyProfileSecretsSchema,
   FeishuConfigSchema,
   TelegramConfigSchema,
+  QQConfigSchema,
   RegistrationConfigSchema,
   AppearanceConfigSchema,
   SystemSettingsSchema,
@@ -53,6 +54,8 @@ import {
   saveUserFeishuConfig,
   getUserTelegramConfig,
   saveUserTelegramConfig,
+  getUserQQConfig,
+  saveUserQQConfig,
   updateAllSessionCredentials,
   refreshOAuthCredentials,
   detectLocalClaudeCode,
@@ -1590,6 +1593,240 @@ configRoutes.delete(
     return c.json({ success: true });
   },
 );
+
+// ─── QQ User IM Config ──────────────────────────────────────────
+
+function maskQQAppSecret(secret: string): string | null {
+  if (!secret) return null;
+  if (secret.length <= 8) return '***';
+  return secret.slice(0, 4) + '***' + secret.slice(-4);
+}
+
+configRoutes.get('/user-im/qq', authMiddleware, (c) => {
+  const user = c.get('user') as AuthUser;
+  try {
+    const config = getUserQQConfig(user.id);
+    if (!config) {
+      return c.json({
+        appId: '',
+        hasAppSecret: false,
+        appSecretMasked: null,
+        enabled: false,
+        updatedAt: null,
+      });
+    }
+    return c.json({
+      appId: config.appId,
+      hasAppSecret: !!config.appSecret,
+      appSecretMasked: maskQQAppSecret(config.appSecret),
+      enabled: config.enabled ?? false,
+      updatedAt: config.updatedAt,
+    });
+  } catch (err) {
+    logger.error({ err }, 'Failed to load user QQ config');
+    return c.json({ error: 'Failed to load user QQ config' }, 500);
+  }
+});
+
+configRoutes.put('/user-im/qq', authMiddleware, async (c) => {
+  const user = c.get('user') as AuthUser;
+  const body = await c.req.json().catch(() => ({}));
+  const validation = QQConfigSchema.safeParse(body);
+  if (!validation.success) {
+    return c.json(
+      { error: 'Invalid request body', details: validation.error.format() },
+      400,
+    );
+  }
+
+  const current = getUserQQConfig(user.id);
+  const next = {
+    appId: current?.appId || '',
+    appSecret: current?.appSecret || '',
+    enabled: current?.enabled ?? true,
+  };
+  if (typeof validation.data.appId === 'string') {
+    next.appId = validation.data.appId.trim();
+  }
+  if (typeof validation.data.appSecret === 'string') {
+    const appSecret = validation.data.appSecret.trim();
+    if (appSecret) next.appSecret = appSecret;
+  } else if (validation.data.clearAppSecret === true) {
+    next.appSecret = '';
+  }
+  if (typeof validation.data.enabled === 'boolean') {
+    next.enabled = validation.data.enabled;
+  } else if (!current && next.appId && next.appSecret) {
+    next.enabled = true;
+  }
+
+  try {
+    const saved = saveUserQQConfig(user.id, {
+      appId: next.appId,
+      appSecret: next.appSecret,
+      enabled: next.enabled,
+    });
+
+    // Hot-reload: reconnect user's QQ channel
+    if (deps?.reloadUserIMConfig) {
+      try {
+        await deps.reloadUserIMConfig(user.id, 'qq');
+      } catch (err) {
+        logger.warn(
+          { err, userId: user.id },
+          'Failed to hot-reload user QQ connection',
+        );
+      }
+    }
+
+    return c.json({
+      appId: saved.appId,
+      hasAppSecret: !!saved.appSecret,
+      appSecretMasked: maskQQAppSecret(saved.appSecret),
+      enabled: saved.enabled ?? false,
+      updatedAt: saved.updatedAt,
+    });
+  } catch (err) {
+    const message =
+      err instanceof Error ? err.message : 'Invalid QQ config payload';
+    logger.warn({ err }, 'Invalid user QQ config payload');
+    return c.json({ error: message }, 400);
+  }
+});
+
+configRoutes.post('/user-im/qq/test', authMiddleware, async (c) => {
+  const user = c.get('user') as AuthUser;
+  const config = getUserQQConfig(user.id);
+  if (!config?.appId || !config?.appSecret) {
+    return c.json({ error: 'QQ App ID and App Secret not configured' }, 400);
+  }
+
+  try {
+    // Test by fetching access token
+    const https = await import('node:https');
+    const body = JSON.stringify({
+      appId: config.appId,
+      clientSecret: config.appSecret,
+    });
+
+    const result = await new Promise<{
+      access_token?: string;
+      expires_in?: number;
+    }>((resolve, reject) => {
+      const url = new URL('https://bots.qq.com/app/getAppAccessToken');
+      const req = https.request(
+        {
+          hostname: url.hostname,
+          path: url.pathname,
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': String(Buffer.byteLength(body)),
+          },
+          timeout: 15000,
+        },
+        (res) => {
+          const chunks: Buffer[] = [];
+          res.on('data', (chunk: Buffer) => chunks.push(chunk));
+          res.on('end', () => {
+            try {
+              resolve(JSON.parse(Buffer.concat(chunks).toString('utf-8')));
+            } catch (err) {
+              reject(err);
+            }
+          });
+          res.on('error', reject);
+        },
+      );
+      req.on('error', reject);
+      req.on('timeout', () => {
+        req.destroy(new Error('Request timeout'));
+      });
+      req.write(body);
+      req.end();
+    });
+
+    if (!result.access_token) {
+      return c.json(
+        {
+          error:
+            'Failed to obtain access token. Please check App ID and App Secret.',
+        },
+        400,
+      );
+    }
+
+    return c.json({
+      success: true,
+      expires_in: result.expires_in,
+    });
+  } catch (err) {
+    const message =
+      err instanceof Error ? err.message : 'Failed to connect to QQ';
+    logger.warn({ err }, 'Failed to test user QQ connection');
+    return c.json({ error: message }, 400);
+  }
+});
+
+configRoutes.post('/user-im/qq/pairing-code', authMiddleware, async (c) => {
+  const user = c.get('user') as AuthUser;
+  const config = getUserQQConfig(user.id);
+  if (!config?.appId || !config?.appSecret) {
+    return c.json({ error: 'QQ App ID and App Secret not configured' }, 400);
+  }
+
+  try {
+    const { generatePairingCode } = await import('../telegram-pairing.js');
+    const result = generatePairingCode(user.id);
+    return c.json(result);
+  } catch (err) {
+    const message =
+      err instanceof Error ? err.message : 'Failed to generate pairing code';
+    logger.warn({ err }, 'Failed to generate QQ pairing code');
+    return c.json({ error: message }, 500);
+  }
+});
+
+// List QQ paired chats for the current user
+configRoutes.get('/user-im/qq/paired-chats', authMiddleware, (c) => {
+  const user = c.get('user') as AuthUser;
+  const groups = (deps?.getRegisteredGroups() ?? {}) as Record<
+    string,
+    { name: string; added_at: string; created_by?: string }
+  >;
+  const chats: Array<{ jid: string; name: string; addedAt: string }> = [];
+  for (const [jid, group] of Object.entries(groups)) {
+    if (jid.startsWith('qq:') && group.created_by === user.id) {
+      chats.push({ jid, name: group.name, addedAt: group.added_at });
+    }
+  }
+  return c.json({ chats });
+});
+
+// Remove (unpair) a QQ chat
+configRoutes.delete('/user-im/qq/paired-chats/:jid', authMiddleware, (c) => {
+  const user = c.get('user') as AuthUser;
+  const jid = decodeURIComponent(c.req.param('jid'));
+
+  if (!jid.startsWith('qq:')) {
+    return c.json({ error: 'Invalid QQ chat JID' }, 400);
+  }
+
+  const groups = deps?.getRegisteredGroups() ?? {};
+  const group = groups[jid];
+  if (!group) {
+    return c.json({ error: 'Chat not found' }, 404);
+  }
+  if (group.created_by !== user.id) {
+    return c.json({ error: 'Not authorized to remove this chat' }, 403);
+  }
+
+  deleteRegisteredGroup(jid);
+  deleteChatHistory(jid);
+  delete groups[jid];
+  logger.info({ jid, userId: user.id }, 'QQ chat unpaired');
+  return c.json({ success: true });
+});
 
 // ─── Local Claude Code detection ──────────────────────────────────
 
