@@ -1160,6 +1160,10 @@ async function runQuery(
         sourceKind: 'sdk_final',
         finalizationReason: 'completed',
       });
+      // After emitting an sdk_final result, rotate turnId so that if
+      // another result is emitted within the same query (e.g. user sent
+      // a follow-up via IPC mid-query), it won't overwrite this one (#214).
+      containerInput.turnId = generateTurnId();
 
       // Emit usage stream event with token counts and cost
       const resultMsg = message as Record<string, unknown>;
