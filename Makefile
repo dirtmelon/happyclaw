@@ -113,6 +113,8 @@ ensure-latest-sdk: ## 启动前自动检测并更新 SDK（有新版才更新）
 
 install: ## 安装全部依赖并编译 agent-runner
 	$(PKG) install
+	@# node-pty 的 spawn-helper 预构建二进制可能缺少可执行权限，导致 PTY 模式失败
+	@chmod +x node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper 2>/dev/null || true
 	cd container/agent-runner && $(PKG) install
 	cd container/agent-runner && $(PKG) run build
 	cd web && $(PKG) install
