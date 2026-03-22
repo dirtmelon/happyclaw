@@ -451,12 +451,6 @@ class IMConnectionManager {
     userId: string,
     config: WeChatConnectConfig,
     onNewChat: (chatJid: string, chatName: string) => void,
-    isChatAuthorized?: (jid: string) => boolean,
-    onPairAttempt?: (
-      jid: string,
-      chatName: string,
-      code: string,
-    ) => Promise<boolean>,
     options?: {
       onCommand?: (chatJid: string, command: string) => Promise<string | null>;
       resolveGroupFolder?: (jid: string) => string | undefined;
@@ -484,8 +478,6 @@ class IMConnectionManager {
         logger.info({ userId }, 'User WeChat bot connected');
       },
       onNewChat,
-      isChatAuthorized,
-      onPairAttempt,
       onCommand: options?.onCommand,
       resolveGroupFolder: options?.resolveGroupFolder,
       resolveEffectiveChatJid: options?.resolveEffectiveChatJid,

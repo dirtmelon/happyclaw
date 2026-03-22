@@ -12,6 +12,7 @@ import { ConfirmDialog } from '@/components/common/ConfirmDialog';
 import { useChatStore } from '../../stores/chat';
 import { showToast } from '../../utils/toast';
 import type { AgentInfo, AvailableImGroup } from '../../types';
+import { ChannelBadge } from '../settings/channel-meta';
 
 interface ImBindingDialogProps {
   open: boolean;
@@ -21,11 +22,6 @@ interface ImBindingDialogProps {
   agent?: AgentInfo;
   onClose: () => void;
 }
-
-const CHANNEL_LABEL: Record<string, string> = {
-  feishu: '飞书群聊',
-  telegram: 'Telegram',
-};
 
 const ACTIVATION_MODE_OPTIONS = [
   { value: 'always', label: '始终响应' },
@@ -196,8 +192,8 @@ export function ImBindingDialog({ open, groupJid, agentId, agent, onClose }: ImB
   };
 
   const title = isMainMode
-    ? '绑定 IM 群组 — 主对话'
-    : `绑定 IM 群组${agent ? ` — ${agent.name}` : ''}`;
+    ? '绑定 IM 渠道 — 主对话'
+    : `绑定 IM 渠道${agent ? ` — ${agent.name}` : ''}`;
 
   return (<>
     <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
@@ -275,7 +271,7 @@ export function ImBindingDialog({ open, groupJid, agentId, agent, onClose }: ImB
                   <div className="flex-1 min-w-0">
                     <div className="text-sm font-medium truncate">{group.name}</div>
                     <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                      <span>{CHANNEL_LABEL[group.channel_type] || group.channel_type}</span>
+                      <ChannelBadge channelType={group.channel_type} />
                       {group.member_count != null && (
                         <span className="flex items-center gap-0.5">
                           <Users className="w-3 h-3" />
