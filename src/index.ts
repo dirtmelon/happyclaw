@@ -2005,8 +2005,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     replySourceImJid = newImJid;
     activeImReplyRoutes.set(effectiveGroup.folder, replySourceImJid);
 
-    // Rebuild streaming session if the target channel changed
-    const newStreamingJid = replySourceImJid ?? chatJid;
+    // Rebuild streaming session if the target channel changed.
+    // When the route is cleared to null (web message injected into IM-originated
+    // session), fall back to the web JID — NOT the original IM chatJid — so the
+    // Feishu streaming card is properly disposed.
+    const newStreamingJid = replySourceImJid ?? (directImReply ? `web:${effectiveGroup.folder}` : chatJid);
     if (newStreamingJid !== streamingSessionJid) {
       if (streamingSession) {
         if (streamingSession.isActive()) streamingSession.dispose();
@@ -2453,10 +2456,13 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             // Skip IM send to the original chatJid when:
             // 1. Streaming card already handled the IM delivery, OR
             // 2. Reply route switched to a different IM channel (the routed IM
-            //    path below will deliver to the correct channel instead).
+            //    path below will deliver to the correct channel instead), OR
+            // 3. Reply route was cleared to null (web message injected into an
+            //    IM-originated session — replies should go to web only).
             // Any send_message content is delivered independently via IPC watcher.
+            const routeCleared = directImReply && replySourceImJid === null;
             const routeSwitchedAway = directImReply && replySourceImJid !== null && replySourceImJid !== chatJid;
-            const skipImSend = (streamingCardHandledIM && directImReply) || routeSwitchedAway;
+            const skipImSend = (streamingCardHandledIM && directImReply) || routeSwitchedAway || routeCleared;
             // When the container stays alive and processes multiple IPC messages,
             // result.turnId stays the same (set at container start).  If we already
             // saved a reply with this turnId, the INSERT OR REPLACE would overwrite

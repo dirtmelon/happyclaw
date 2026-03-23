@@ -1460,6 +1460,18 @@ async function runQuery(
       return { newSessionId, lastAssistantUuid, closedDuringQuery, interruptedDuringQuery };
     }
 
+    // SDK 在 yield result 后可能再抛异常（如检测到 result text 含错误内容），
+    // 但此时 success 结果已通过 emit() 发送给调用方。再 re-throw 会导致
+    // 外层 catch 额外发射一条 error output 并 exit(1)，引发无意义的重试。
+    // 如果已成功发射过结果，将后续 SDK 异常降级为警告。
+    if (resultCount > 0) {
+      log(`runQuery post-result SDK error (non-fatal, ${resultCount} result(s) already emitted): ${errorMessage}`);
+      if (err instanceof Error && err.stack) {
+        log(`runQuery post-result error stack:\n${err.stack}`);
+      }
+      return { newSessionId, lastAssistantUuid, closedDuringQuery, interruptedDuringQuery };
+    }
+
     // 其他错误：记录完整堆栈后继续抛出
     log(`runQuery error [${(err as NodeJS.ErrnoException).code ?? 'unknown'}]: ${errorMessage}`);
     if (err instanceof Error && err.stack) {
