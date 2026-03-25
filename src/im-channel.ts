@@ -35,7 +35,7 @@ import { CHANNEL_PREFIXES } from './channel-prefixes.js';
 
 export interface IMChannelConnectOpts {
   onReady: () => void;
-  onNewChat: (chatJid: string, chatName: string) => void;
+  onNewChat: (chatJid: string, chatName: string) => boolean;
   onMessage?: (chatJid: string, text: string, senderName: string) => void;
   ignoreMessagesBefore?: number;
   isChatAuthorized?: (jid: string) => boolean;

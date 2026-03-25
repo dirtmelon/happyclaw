@@ -52,7 +52,7 @@ export interface QQConnectionConfig {
 
 export interface QQConnectOpts {
   onReady?: () => void;
-  onNewChat: (jid: string, name: string) => void;
+  onNewChat: (jid: string, name: string) => boolean;
   isChatAuthorized: (jid: string) => boolean;
   ignoreMessagesBefore?: number;
   onPairAttempt?: (

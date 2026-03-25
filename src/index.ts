@@ -4363,6 +4363,7 @@ async function processTaskIpc(
           containerConfig: data.containerConfig,
           created_by: sourceEntry?.created_by,
           executionMode: execMode,
+          require_mention: true,
         });
       } else {
         logger.warn(
@@ -5653,15 +5654,15 @@ async function ensureDockerRunning(): Promise<void> {
 function buildOnNewChat(
   userId: string,
   homeFolder: string,
-): (chatJid: string, chatName: string) => void {
+): (chatJid: string, chatName: string) => boolean {
   return (chatJid, chatName) => {
     const existing = registeredGroups[chatJid];
     if (existing) {
       // Already owned by this user — nothing to do
-      if (existing.created_by === userId) return;
+      if (existing.created_by === userId) return true;
 
       // Don't override groups with explicit IM routing configured.
-      if (existing.target_agent_id || existing.target_main_jid) return;
+      if (existing.target_agent_id || existing.target_main_jid) return true;
 
       // Backfill missing created_by without changing folder binding.
       // Legacy IM groups may have NULL created_by after migration;
@@ -5674,7 +5675,7 @@ function buildOnNewChat(
           { chatJid, chatName, userId, folder: existing.folder },
           'Backfilled created_by for IM chat (preserved existing folder)',
         );
-        return;
+        return true;
       }
 
       // Different user's connection now owns this IM app.
@@ -5700,18 +5701,31 @@ function buildOnNewChat(
           'Re-routed IM chat to new user (IM credentials transferred)',
         );
       }
-      return;
+      return true;
     }
+
+    // Check if auto-registration is enabled
+    const { autoRegisterIMChats } = getSystemSettings();
+    if (!autoRegisterIMChats) {
+      logger.info(
+        { chatJid, chatName, userId },
+        'Rejected new IM chat: autoRegisterIMChats is disabled',
+      );
+      return false;
+    }
+
     registerGroup(chatJid, {
       name: chatName,
       folder: homeFolder,
       added_at: new Date().toISOString(),
       created_by: userId,
+      require_mention: true,
     });
     logger.info(
       { chatJid, chatName, userId, homeFolder },
       'Auto-registered IM chat',
     );
+    return true;
   };
 }
 

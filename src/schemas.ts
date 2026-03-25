@@ -221,6 +221,7 @@ export const SystemSettingsSchema = z.object({
   scriptTimeout: z.number().int().min(5000).max(600000).optional(),
   skillAutoSyncEnabled: z.boolean().optional(),
   skillAutoSyncIntervalMinutes: z.number().int().min(1).max(1440).optional(),
+  autoRegisterIMChats: z.boolean().optional(),
   billingEnabled: z.boolean().optional(),
   billingMode: z.literal('wallet_first').optional(),
   billingMinStartBalanceUsd: z.number().min(0).max(1000000).optional(),
