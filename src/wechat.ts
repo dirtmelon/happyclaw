@@ -74,7 +74,7 @@ export interface WeChatConnectionConfig {
 
 export interface WeChatConnectOpts {
   onReady?: () => void;
-  onNewChat: (jid: string, name: string) => void;
+  onNewChat: (jid: string, name: string) => boolean;
   ignoreMessagesBefore?: number;
   onCommand?: (chatJid: string, command: string) => Promise<string | null>;
   resolveGroupFolder?: (jid: string) => string | undefined;

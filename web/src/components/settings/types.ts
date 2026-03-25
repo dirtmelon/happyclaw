@@ -104,6 +104,7 @@ export interface SystemSettings {
   scriptTimeout: number;
   skillAutoSyncEnabled: boolean;
   skillAutoSyncIntervalMinutes: number;
+  autoRegisterIMChats: boolean;
   billingEnabled: boolean;
   billingMode: 'wallet_first';
   billingMinStartBalanceUsd: number;

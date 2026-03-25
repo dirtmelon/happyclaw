@@ -3365,6 +3365,8 @@ export interface SystemSettings {
   // Skills auto-sync
   skillAutoSyncEnabled: boolean;
   skillAutoSyncIntervalMinutes: number;
+  // IM auto-registration
+  autoRegisterIMChats: boolean;
   // Billing
   billingEnabled: boolean;
   billingMode: 'wallet_first';
@@ -3385,6 +3387,7 @@ const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
   scriptTimeout: 60000,
   skillAutoSyncEnabled: false,
   skillAutoSyncIntervalMinutes: 10,
+  autoRegisterIMChats: true,
   billingEnabled: false,
   billingMode: 'wallet_first',
   billingMinStartBalanceUsd: 0.01,
@@ -3463,6 +3466,10 @@ function readSystemSettingsFromFile(): SystemSettings | null {
       raw.skillAutoSyncIntervalMinutes >= 1
         ? raw.skillAutoSyncIntervalMinutes
         : DEFAULT_SYSTEM_SETTINGS.skillAutoSyncIntervalMinutes,
+    autoRegisterIMChats:
+      typeof raw.autoRegisterIMChats === 'boolean'
+        ? raw.autoRegisterIMChats
+        : DEFAULT_SYSTEM_SETTINGS.autoRegisterIMChats,
     billingEnabled:
       typeof raw.billingEnabled === 'boolean'
         ? raw.billingEnabled
@@ -3529,6 +3536,9 @@ function buildEnvFallbackSettings(): SystemSettings {
       process.env.SKILL_AUTO_SYNC_INTERVAL_MINUTES,
       DEFAULT_SYSTEM_SETTINGS.skillAutoSyncIntervalMinutes,
     ),
+    autoRegisterIMChats:
+      process.env.AUTO_REGISTER_IM_CHATS !== 'false' &&
+      DEFAULT_SYSTEM_SETTINGS.autoRegisterIMChats,
     billingEnabled:
       process.env.BILLING_ENABLED === 'true' ||
       DEFAULT_SYSTEM_SETTINGS.billingEnabled,

@@ -133,6 +133,7 @@ export function SystemSettingsSection({ setNotice, setError }: SystemSettingsSec
 
   const [settings, setSettings] = useState<SystemSettings | null>(null);
   const [displayValues, setDisplayValues] = useState<Record<string, number>>({});
+  const [autoRegisterIMChats, setAutoRegisterIMChats] = useState(true);
   const [billingEnabled, setBillingEnabled] = useState(false);
   const [billingMinStartBalanceUsd, setBillingMinStartBalanceUsd] = useState(0.01);
   const [billingCurrency, setBillingCurrency] = useState('USD');
@@ -157,6 +158,7 @@ export function SystemSettingsSection({ setNotice, setError }: SystemSettingsSec
           display[f.key] = f.toDisplay(data[f.key] as number);
         }
         setDisplayValues(display);
+        setAutoRegisterIMChats(data.autoRegisterIMChats ?? true);
         setBillingEnabled(data.billingEnabled ?? false);
         setBillingMinStartBalanceUsd(data.billingMinStartBalanceUsd ?? 0.01);
         setBillingCurrency(data.billingCurrency ?? 'USD');
@@ -202,6 +204,7 @@ export function SystemSettingsSection({ setNotice, setError }: SystemSettingsSec
     setNotice(null);
     try {
       const payload: Partial<SystemSettings> = {
+        autoRegisterIMChats,
         billingEnabled,
         billingMode: 'wallet_first',
         billingMinStartBalanceUsd,
@@ -221,6 +224,7 @@ export function SystemSettingsSection({ setNotice, setError }: SystemSettingsSec
         display[f.key] = f.toDisplay(data[f.key] as number);
       }
       setDisplayValues(display);
+      setAutoRegisterIMChats(data.autoRegisterIMChats ?? true);
       setBillingEnabled(data.billingEnabled ?? false);
       setBillingMinStartBalanceUsd(data.billingMinStartBalanceUsd ?? 0.01);
       setBillingCurrency(data.billingCurrency ?? 'USD');
@@ -284,6 +288,25 @@ export function SystemSettingsSection({ setNotice, setError }: SystemSettingsSec
             </p>
           </div>
         ))}
+      </div>
+
+      {/* IM 设置 */}
+      <div className="border-t border-border pt-6 space-y-5">
+        <h3 className="text-sm font-semibold text-foreground">IM 消息</h3>
+
+        <div className="flex items-center justify-between">
+          <div>
+            <label className="block text-sm font-medium text-foreground">自动注册新 IM 群组</label>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              关闭后，来自未注册飞书/Telegram/QQ 群组的消息将被静默忽略，不会自动创建工作区
+            </p>
+          </div>
+          <ToggleSwitch
+            checked={autoRegisterIMChats}
+            onChange={setAutoRegisterIMChats}
+            aria-label="自动注册新 IM 群组"
+          />
+        </div>
       </div>
 
       {/* 计费设置 */}
