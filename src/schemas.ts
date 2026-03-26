@@ -325,6 +325,7 @@ export const ClaudeOAuthCredentialsSchema = z.object({
   refreshToken: z.string().min(1),
   expiresAt: z.number(),
   scopes: z.array(z.string()).default([]),
+  subscriptionType: z.string().optional(),
 });
 
 export const ClaudeSecretsSchema = z
@@ -555,16 +556,18 @@ export const RedeemCodeSchema = z.object({
 });
 
 // Memory types
+export type MemoryType = 'global' | 'heartbeat' | 'session' | 'date' | 'conversation';
+
 export interface MemorySource {
   path: string;
   label: string;
-  scope: 'user-global' | 'main' | 'flow' | 'session';
-  kind: 'claude' | 'note' | 'session';
+  type: MemoryType;
   writable: boolean;
   exists: boolean;
   updatedAt: string | null;
   size: number;
   ownerName?: string;
+  folder?: string;
 }
 
 export interface MemoryFilePayload {

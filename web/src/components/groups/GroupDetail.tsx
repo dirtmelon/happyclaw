@@ -1,3 +1,6 @@
+import { useNavigate } from 'react-router-dom';
+import { BookOpen } from 'lucide-react';
+import { Button } from '@/components/ui/button';
 import { GroupInfo } from '../../stores/groups';
 
 interface GroupDetailProps {
@@ -5,6 +8,7 @@ interface GroupDetailProps {
 }
 
 export function GroupDetail({ group }: GroupDetailProps) {
+  const navigate = useNavigate();
   const formatDate = (timestamp: string | number) => {
     return new Date(timestamp).toLocaleString('zh-CN', {
       year: 'numeric',
@@ -54,9 +58,16 @@ export function GroupDetail({ group }: GroupDetailProps) {
         </div>
       )}
 
-      {/* Note */}
-      <div className="text-xs text-muted-foreground pt-2 border-t border-border">
-        暂不支持编辑群组配置
+      {/* Quick Actions */}
+      <div className="pt-2 border-t border-border">
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => navigate(`/settings?tab=memory&folder=${encodeURIComponent(group.folder)}`)}
+        >
+          <BookOpen className="w-4 h-4" />
+          记忆管理
+        </Button>
       </div>
     </div>
   );

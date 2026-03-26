@@ -18,7 +18,7 @@ import { notifyNewImMessage } from './message-notifier.js';
 import { broadcastNewMessage } from './web.js';
 import { logger } from './logger.js';
 import { saveDownloadedFile, MAX_FILE_SIZE } from './im-downloader.js';
-import { detectImageMimeType } from './image-detector.js';
+import { detectImageMimeTypeStrict } from './image-detector.js';
 // ─── Constants ──────────────────────────────────────────────────
 
 const QQ_TOKEN_URL = 'https://bots.qq.com/app/getAppAccessToken';
@@ -29,6 +29,13 @@ const MSG_DEDUP_TTL = 30 * 60 * 1000; // 30min
 const MSG_SPLIT_LIMIT = 5000;
 const RECONNECT_DELAY_MS = 5000;
 const MAX_RECONNECT_ATTEMPTS = 10;
+
+const IMAGE_EXT_MAP: Record<string, string> = {
+  'image/jpeg': '.jpg',
+  'image/png': '.png',
+  'image/gif': '.gif',
+  'image/webp': '.webp',
+};
 
 // Intents: PUBLIC_MESSAGES (C2C + group @bot)
 const INTENTS = 1 << 25;
@@ -405,9 +412,9 @@ export function createQQConnection(config: QQConnectionConfig): QQConnection {
 
   // ─── File Download ─────────────────────────────────────────
 
-  async function downloadQQImageAsBase64(
+  async function downloadQQAttachment(
     url: string,
-  ): Promise<{ base64: string; mimeType: string } | null> {
+  ): Promise<Buffer | null> {
     try {
       const buffer = await new Promise<Buffer>((resolve, reject) => {
         const doRequest = (reqUrl: string, redirectCount: number = 0) => {
@@ -433,7 +440,7 @@ export function createQQConnection(config: QQConnectionConfig): QQConnection {
               res.on('data', (chunk: Buffer) => {
                 total += chunk.length;
                 if (total > MAX_FILE_SIZE) {
-                  res.destroy(new Error('Image exceeds MAX_FILE_SIZE'));
+                  res.destroy(new Error('File exceeds MAX_FILE_SIZE'));
                   return;
                 }
                 chunks.push(chunk);
@@ -447,12 +454,73 @@ export function createQQConnection(config: QQConnectionConfig): QQConnection {
       });
 
       if (buffer.length === 0) return null;
-      const mimeType = detectImageMimeType(buffer);
-      return { base64: buffer.toString('base64'), mimeType };
+      return buffer;
     } catch (err) {
-      logger.warn({ err }, 'Failed to download QQ image as base64');
+      logger.warn({ err }, 'Failed to download QQ attachment');
       return null;
     }
+  }
+
+  /**
+   * Process a QQ attachment (image or file): download, detect type, save to disk.
+   * Returns updated content string and optional attachmentsJson for vision.
+   */
+  async function processQQAttachment(
+    attachment: { url?: string; filename?: string },
+    msgId: string,
+    jid: string,
+    content: string,
+    opts: QQConnectOpts,
+    logContext: string,
+  ): Promise<{ content: string; attachmentsJson?: string }> {
+    if (!attachment.url) return { content };
+
+    const attachUrl = attachment.url.startsWith('http')
+      ? attachment.url
+      : `https://${attachment.url}`;
+    const buffer = await downloadQQAttachment(attachUrl);
+    if (!buffer) return { content };
+
+    const imageMime = detectImageMimeTypeStrict(buffer);
+    const groupFolder = opts.resolveGroupFolder?.(jid);
+
+    if (imageMime) {
+      const attachmentsJson = JSON.stringify([
+        { type: 'image', data: buffer.toString('base64'), mimeType: imageMime },
+      ]);
+
+      if (groupFolder) {
+        const ext = IMAGE_EXT_MAP[imageMime] ?? '.jpg';
+        const fileName = `qq_img_${msgId.slice(-8)}${ext}`;
+        try {
+          const relPath = await saveDownloadedFile(groupFolder, 'qq', fileName, buffer);
+          if (relPath) content = `[图片: ${relPath}]\n${content}`.trim();
+        } catch (err) {
+          logger.warn({ err }, `Failed to save QQ ${logContext} image`);
+        }
+      }
+
+      if (!content) content = '[图片]';
+      return { content, attachmentsJson };
+    }
+
+    // Non-image file
+    const urlFilename = attachment.filename
+      || attachUrl.split('/').pop()?.split('?')[0]
+      || `qq_file_${msgId.slice(-8)}`;
+    const fileName = urlFilename.replace(/[^a-zA-Z0-9._\-\u4e00-\u9fff]/g, '_');
+
+    if (groupFolder) {
+      try {
+        const relPath = await saveDownloadedFile(groupFolder, 'qq', fileName, buffer);
+        if (relPath) content = `[文件: ${relPath}]\n${content}`.trim();
+      } catch (err) {
+        logger.warn({ err }, `Failed to save QQ ${logContext} file`);
+      }
+    }
+
+    if (!content) content = '[文件]';
+    return { content };
   }
 
   // ─── WebSocket Connection ─────────────────────────────────
@@ -751,51 +819,14 @@ export function createQQConnection(config: QQConnectionConfig): QQConnection {
         }
       }
 
-      // Handle attachments (images)
+      // Handle attachments (images / files)
       let attachmentsJson: string | undefined;
       if (data.attachments?.length) {
-        const attachment = data.attachments[0];
-        if (attachment.url) {
-          const imageUrl = attachment.url.startsWith('http')
-            ? attachment.url
-            : `https://${attachment.url}`;
-          const imageData = await downloadQQImageAsBase64(imageUrl);
-
-          if (imageData) {
-            attachmentsJson = JSON.stringify([
-              {
-                type: 'image',
-                data: imageData.base64,
-                mimeType: imageData.mimeType,
-              },
-            ]);
-
-            const groupFolder = opts.resolveGroupFolder?.(jid);
-            if (groupFolder) {
-              const extMap: Record<string, string> = {
-                'image/jpeg': '.jpg',
-                'image/png': '.png',
-                'image/gif': '.gif',
-                'image/webp': '.webp',
-              };
-              const ext = extMap[imageData.mimeType] ?? '.jpg';
-              const fileName = `qq_img_${msgId.slice(-8)}${ext}`;
-              try {
-                const relPath = await saveDownloadedFile(
-                  groupFolder,
-                  'qq',
-                  fileName,
-                  Buffer.from(imageData.base64, 'base64'),
-                );
-                if (relPath) content = `[图片: ${relPath}]\n${content}`.trim();
-              } catch (err) {
-                logger.warn({ err }, 'Failed to save QQ image to disk');
-              }
-            }
-
-            if (!content) content = '[图片]';
-          }
-        }
+        const result = await processQQAttachment(
+          data.attachments[0], msgId, jid, content, opts, 'c2c',
+        );
+        content = result.content;
+        attachmentsJson = result.attachmentsJson;
       }
 
       // Route and store message
@@ -944,51 +975,14 @@ export function createQQConnection(config: QQConnectionConfig): QQConnection {
         }
       }
 
-      // Handle attachments
+      // Handle attachments (images / files)
       let attachmentsJson: string | undefined;
       if (data.attachments?.length) {
-        const attachment = data.attachments[0];
-        if (attachment.url) {
-          const imageUrl = attachment.url.startsWith('http')
-            ? attachment.url
-            : `https://${attachment.url}`;
-          const imageData = await downloadQQImageAsBase64(imageUrl);
-
-          if (imageData) {
-            attachmentsJson = JSON.stringify([
-              {
-                type: 'image',
-                data: imageData.base64,
-                mimeType: imageData.mimeType,
-              },
-            ]);
-
-            const groupFolder = opts.resolveGroupFolder?.(jid);
-            if (groupFolder) {
-              const extMap: Record<string, string> = {
-                'image/jpeg': '.jpg',
-                'image/png': '.png',
-                'image/gif': '.gif',
-                'image/webp': '.webp',
-              };
-              const ext = extMap[imageData.mimeType] ?? '.jpg';
-              const fileName = `qq_img_${msgId.slice(-8)}${ext}`;
-              try {
-                const relPath = await saveDownloadedFile(
-                  groupFolder,
-                  'qq',
-                  fileName,
-                  Buffer.from(imageData.base64, 'base64'),
-                );
-                if (relPath) content = `[图片: ${relPath}]\n${content}`.trim();
-              } catch (err) {
-                logger.warn({ err }, 'Failed to save QQ group image');
-              }
-            }
-
-            if (!content) content = '[图片]';
-          }
-        }
+        const result = await processQQAttachment(
+          data.attachments[0], msgId, jid, content, opts, 'group',
+        );
+        content = result.content;
+        attachmentsJson = result.attachmentsJson;
       }
 
       // Route and store

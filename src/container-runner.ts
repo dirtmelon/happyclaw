@@ -35,7 +35,7 @@ import { providerPool } from './provider-pool.js';
 import { isApiError } from './agent-output-parser.js';
 import type { ClaudeProviderConfig } from './runtime-config.js';
 import { loadUserMcpServers } from './mcp-utils.js';
-import { RegisteredGroup, StreamEvent } from './types.js';
+import { MessageSourceKind, RegisteredGroup, StreamEvent } from './types.js';
 import {
   attachStderrHandler,
   attachStdoutHandler,
@@ -124,13 +124,7 @@ export interface ContainerOutput {
   turnId?: string;
   sessionId?: string;
   sdkMessageUuid?: string;
-  sourceKind?:
-    | 'sdk_final'
-    | 'sdk_send_message'
-    | 'interrupt_partial'
-    | 'overflow_partial'
-    | 'compact_partial'
-    | 'legacy';
+  sourceKind?: Exclude<MessageSourceKind, 'user_command'>;
   finalizationReason?: 'completed' | 'interrupted' | 'error';
 }
 

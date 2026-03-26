@@ -25,7 +25,6 @@ const USER_GLOBAL_DIR = path.join(GROUPS_DIR, 'user-global');
 const MAIN_MEMORY_DIR = path.join(GROUPS_DIR, 'main');
 const MAIN_MEMORY_FILE = path.join(MAIN_MEMORY_DIR, 'CLAUDE.md');
 const MEMORY_DATA_DIR = path.join(DATA_DIR, 'memory');
-const SESSIONS_DIR = path.join(DATA_DIR, 'sessions');
 const MAX_GLOBAL_MEMORY_LENGTH = 200_000;
 const MAX_MEMORY_FILE_LENGTH = 500_000;
 const MEMORY_LIST_LIMIT = 500;
@@ -78,11 +77,9 @@ function resolveMemoryPath(
   const absolute = path.resolve(process.cwd(), relativePath);
   const inGroups = isWithinRoot(absolute, GROUPS_DIR);
   const inMemoryData = isWithinRoot(absolute, MEMORY_DATA_DIR);
-  const inSessions = isWithinRoot(absolute, SESSIONS_DIR);
   const writable = inGroups || inMemoryData;
-  const readable = writable || inSessions;
 
-  if (!readable) {
+  if (!writable) {
     throw new Error('Memory path out of allowed scope');
   }
 
@@ -112,14 +109,6 @@ function resolveMemoryPath(
         throw new Error('Memory path out of allowed scope');
       }
     }
-    // data/sessions/{folder}/... — check group ownership
-    else if (inSessions) {
-      const relToSessions = path.relative(SESSIONS_DIR, absolute);
-      const folder = relToSessions.split(path.sep)[0];
-      if (!isUserOwnedFolder(user, folder)) {
-        throw new Error('Memory path out of allowed scope');
-      }
-    }
   }
 
   return { absolutePath: absolute, writable };
@@ -143,9 +132,10 @@ function isUserOwnedFolder(
 
 function classifyMemorySource(
   relativePath: string,
-): Pick<MemorySource, 'scope' | 'kind' | 'label' | 'ownerName'> {
+): Pick<MemorySource, 'type' | 'label' | 'ownerName' | 'folder'> {
   const parts = relativePath.split('/');
-  // data/groups/user-global/{userId}/CLAUDE.md
+
+  // data/groups/user-global/{userId}/...
   if (
     parts[0] === 'data' &&
     parts[1] === 'groups' &&
@@ -155,44 +145,64 @@ function classifyMemorySource(
     const name = parts.slice(4).join('/') || 'CLAUDE.md';
     const owner = getUserById(userId);
     const ownerLabel = owner ? owner.display_name || owner.username : userId;
+
+    if (name === 'HEARTBEAT.md') {
+      return {
+        type: 'heartbeat',
+        label: `${ownerLabel} / 每日心跳`,
+        ownerName: ownerLabel,
+      };
+    }
     return {
-      scope: 'user-global',
-      kind: 'claude',
+      type: 'global',
       label: `${ownerLabel} / 全局记忆 / ${name}`,
       ownerName: ownerLabel,
     };
   }
-  // data/groups/main/CLAUDE.md
-  if (relativePath === 'data/groups/main/CLAUDE.md') {
-    return { scope: 'main', kind: 'claude', label: '主会话记忆 / CLAUDE.md' };
-  }
+
   // data/memory/{folder}/...
   if (parts[0] === 'data' && parts[1] === 'memory') {
     const folder = parts[2] || 'unknown';
     const name = parts.slice(3).join('/') || 'memory';
     return {
-      scope: folder === 'main' ? 'main' : 'flow',
-      kind: 'note' as const,
+      type: 'date',
       label: `${folder} / 日期记忆 / ${name}`,
+      folder,
     };
   }
-  // data/groups/{folder}/... (non user-global)
+
+  // data/groups/{folder}/conversations/...
+  if (
+    parts[0] === 'data' &&
+    parts[1] === 'groups' &&
+    parts.length >= 4 &&
+    parts[3] === 'conversations'
+  ) {
+    const folder = parts[2] || 'unknown';
+    const name = parts.slice(4).join('/');
+    return {
+      type: 'conversation',
+      label: `${folder} / 对话归档 / ${name}`,
+      folder,
+    };
+  }
+
+  // data/groups/{folder}/... (session memory)
   if (parts[0] === 'data' && parts[1] === 'groups') {
     const folder = parts[2] || 'unknown';
     const name = parts.slice(3).join('/');
-    const kind = name === 'CLAUDE.md' ? 'claude' : 'note';
     return {
-      scope: folder === 'main' ? 'main' : 'flow',
-      kind,
+      type: 'session',
       label: `${folder} / ${name}`,
+      folder,
     };
   }
-  // data/sessions/{folder}/.claude/...
-  const sessionRel = parts.slice(2).join('/');
+
+  // Fallback
   return {
-    scope: 'session',
-    kind: 'session',
-    label: `会话自动记忆 / ${sessionRel}`,
+    type: 'session',
+    label: parts.slice(2).join('/'),
+    folder: parts[2] || undefined,
   };
 }
 
@@ -252,6 +262,9 @@ function writeMemoryFile(
   if (isBlockedMemoryPath(normalized)) {
     throw new Error('Cannot write to system path');
   }
+  if (normalized.includes('user-global/') && normalized.endsWith('/HEARTBEAT.md')) {
+    throw new Error('HEARTBEAT.md is read-only (auto-generated)');
+  }
   if (Buffer.byteLength(content, 'utf-8') > MAX_MEMORY_FILE_LENGTH) {
     throw new Error('Memory file is too large');
   }
@@ -270,6 +283,9 @@ function writeMemoryFile(
     writable,
   };
 }
+
+// Directories to skip when scanning group workspaces for memory files
+const WALK_SKIP_DIRS = new Set(['logs', '.claude', 'conversations', 'downloads', 'node_modules']);
 
 function walkFiles(
   baseDir: string,
@@ -290,6 +306,7 @@ function walkFiles(
     if (out.length >= limit) break;
     const fullPath = path.join(baseDir, entry.name);
     if (entry.isDirectory()) {
+      if (WALK_SKIP_DIRS.has(entry.name)) continue;
       walkFiles(fullPath, maxDepth, limit, out, currentDepth + 1);
       continue;
     }
@@ -298,9 +315,7 @@ function walkFiles(
 }
 
 function isMemoryCandidateFile(filePath: string): boolean {
-  const base = path.basename(filePath).toLowerCase();
-  if (base === 'settings.json') return true;
-  const ext = path.extname(base);
+  const ext = path.extname(filePath).toLowerCase();
   return MEMORY_SOURCE_EXTENSIONS.has(ext);
 }
 
@@ -322,15 +337,19 @@ function listMemorySources(user: AuthUser): MemorySource[] {
     }
   }
 
-  // 1. User-global memory: each user only sees their own
+  // 1. User-global memory + heartbeat
   files.add(path.join(USER_GLOBAL_DIR, user.id, 'CLAUDE.md'));
+  const heartbeatPath = path.join(USER_GLOBAL_DIR, user.id, 'HEARTBEAT.md');
+  if (fs.existsSync(heartbeatPath)) {
+    files.add(heartbeatPath);
+  }
 
-  // 2. Group memories: filter by ownership
+  // 2. Group CLAUDE.md files
   for (const folder of accessibleFolders) {
     files.add(path.join(GROUPS_DIR, folder, 'CLAUDE.md'));
   }
 
-  // 3. Scan group directories (filtered by access)
+  // 3. Scan group workspace directories (skips system dirs via WALK_SKIP_DIRS)
   for (const folder of accessibleFolders) {
     const folderDir = path.join(GROUPS_DIR, folder);
     const scanned: string[] = [];
@@ -340,7 +359,7 @@ function listMemorySources(user: AuthUser): MemorySource[] {
     }
   }
 
-  // 4. Scan data/memory/ (filtered by folder access)
+  // 4. Scan data/memory/ (date memory files)
   if (fs.existsSync(MEMORY_DATA_DIR)) {
     const memFolders = fs.readdirSync(MEMORY_DATA_DIR, { withFileTypes: true });
     for (const d of memFolders) {
@@ -359,40 +378,30 @@ function listMemorySources(user: AuthUser): MemorySource[] {
     }
   }
 
-  // 5. Scan sessions (filtered by folder access)
-  const sessionsDir = path.join(DATA_DIR, 'sessions');
-  if (fs.existsSync(sessionsDir)) {
-    const sessFolders = fs.readdirSync(sessionsDir, { withFileTypes: true });
-    for (const d of sessFolders) {
-      if (d.isDirectory() && (isAdmin || accessibleFolders.has(d.name))) {
-        const scanned: string[] = [];
-        walkFiles(
-          path.join(sessionsDir, d.name),
-          7,
-          MEMORY_LIST_LIMIT,
-          scanned,
-        );
-        for (const f of scanned) {
-          if (isMemoryCandidateFile(f)) files.add(f);
-        }
+  // 5. Scan conversations/ directories (read-only archives)
+  for (const folder of accessibleFolders) {
+    const convDir = path.join(GROUPS_DIR, folder, 'conversations');
+    if (!fs.existsSync(convDir)) continue;
+    try {
+      const entries = fs.readdirSync(convDir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (files.size >= MEMORY_LIST_LIMIT) break;
+        if (!entry.isFile()) continue;
+        const fullPath = path.join(convDir, entry.name);
+        if (isMemoryCandidateFile(fullPath)) files.add(fullPath);
       }
-    }
+    } catch { /* skip unreadable */ }
   }
 
   const sources: MemorySource[] = [];
   for (const absolutePath of files) {
-    const readable =
-      isWithinRoot(absolutePath, GROUPS_DIR) ||
-      isWithinRoot(absolutePath, MEMORY_DATA_DIR) ||
-      isWithinRoot(absolutePath, path.join(DATA_DIR, 'sessions'));
-    if (!readable) continue;
+    const inGroups = isWithinRoot(absolutePath, GROUPS_DIR);
+    const inMemoryData = isWithinRoot(absolutePath, MEMORY_DATA_DIR);
+    if (!inGroups && !inMemoryData) continue;
 
     const relativePath = path
       .relative(process.cwd(), absolutePath)
       .replace(/\\/g, '/');
-    const writable =
-      isWithinRoot(absolutePath, GROUPS_DIR) ||
-      isWithinRoot(absolutePath, MEMORY_DATA_DIR);
     const exists = fs.existsSync(absolutePath);
     let updatedAt: string | null = null;
     let size = 0;
@@ -403,6 +412,7 @@ function listMemorySources(user: AuthUser): MemorySource[] {
     }
 
     const classified = classifyMemorySource(relativePath);
+    const writable = classified.type !== 'heartbeat' && classified.type !== 'conversation';
     sources.push({
       path: relativePath,
       writable,
@@ -413,23 +423,19 @@ function listMemorySources(user: AuthUser): MemorySource[] {
     });
   }
 
-  const scopeRank: Record<MemorySource['scope'], number> = {
-    'user-global': 0,
-    main: 1,
-    flow: 2,
-    session: 3,
-  };
-  const kindRank: Record<MemorySource['kind'], number> = {
-    claude: 0,
-    note: 1,
+  const typeRank: Record<MemorySource['type'], number> = {
+    global: 0,
+    heartbeat: 1,
     session: 2,
+    date: 3,
+    conversation: 4,
   };
 
   sources.sort((a, b) => {
-    if (scopeRank[a.scope] !== scopeRank[b.scope])
-      return scopeRank[a.scope] - scopeRank[b.scope];
-    if (kindRank[a.kind] !== kindRank[b.kind])
-      return kindRank[a.kind] - kindRank[b.kind];
+    if (typeRank[a.type] !== typeRank[b.type])
+      return typeRank[a.type] - typeRank[b.type];
+    if (a.folder !== b.folder)
+      return (a.folder || '').localeCompare(b.folder || '', 'zh-CN');
     return a.path.localeCompare(b.path, 'zh-CN');
   });
 

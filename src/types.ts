@@ -87,7 +87,8 @@ export type MessageSourceKind =
   | 'overflow_partial'
   | 'compact_partial'
   | 'user_command'
-  | 'legacy';
+  | 'legacy'
+  | 'auto_continue';
 
 export type MessageFinalizationReason =
   | 'completed'

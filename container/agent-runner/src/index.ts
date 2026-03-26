@@ -44,7 +44,8 @@ const WORKSPACE_IPC = process.env.HAPPYCLAW_WORKSPACE_IPC || '/workspace/ipc';
 
 // 模型配置：支持别名（opus/sonnet/haiku）或完整模型 ID
 // 别名自动解析为最新版本，如 opus → Opus 4.6
-const CLAUDE_MODEL = process.env.ANTHROPIC_MODEL || 'opus';
+// [1m] 后缀启用 1M 上下文窗口（CLI 内部 jG() 识别后缀，sM() 返回 1M 窗口）
+const CLAUDE_MODEL = process.env.ANTHROPIC_MODEL || 'opus[1m]';
 
 const IPC_INPUT_DIR = path.join(WORKSPACE_IPC, 'input');
 const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
@@ -926,6 +927,7 @@ async function runQuery(
   allowedTools: string[] = DEFAULT_ALLOWED_TOOLS,
   disallowedTools?: string[],
   images?: Array<{ data: string; mimeType?: string }>,
+  sourceKindOverride?: ContainerOutput['sourceKind'],
 ): Promise<{ newSessionId?: string; lastAssistantUuid?: string; closedDuringQuery: boolean; contextOverflow?: boolean; unrecoverableTranscriptError?: boolean; interruptedDuringQuery: boolean; sessionResumeFailed?: boolean }> {
   const stream = new MessageStream();
   let newSessionId: string | undefined;
@@ -1201,7 +1203,6 @@ async function runQuery(
     prompt: stream,
     options: {
       model: CLAUDE_MODEL,
-      betas: ['context-1m-2025-08-07'],
       cwd: WORKSPACE_GROUP,
       additionalDirectories: extraDirs,
       resume: sessionId,
@@ -1407,7 +1408,7 @@ async function runQuery(
         result: finalText,
         newSessionId,
         sdkMessageUuid: canonicalAssistantUuid || lastAssistantUuid,
-        sourceKind: 'sdk_final',
+        sourceKind: sourceKindOverride ?? 'sdk_final',
         finalizationReason: 'completed',
       });
       // After emitting an sdk_final result, rotate turnId so that if
@@ -1618,6 +1619,8 @@ async function main(): Promise<void> {
   let resumeAt: string | undefined;
   let overflowRetryCount = 0;
   const MAX_OVERFLOW_RETRIES = 3;
+  let consecutiveCompactions = 0;
+  const MAX_CONSECUTIVE_COMPACTIONS = 3;
   try {
     while (true) {
       // 清理残留的 _interrupt sentinel（空闲期间写入的中断信号不应影响下一次 query）。
@@ -1654,6 +1657,7 @@ async function main(): Promise<void> {
         sessionId = undefined;
         latestSessionId = undefined;
         resumeAt = undefined;
+        consecutiveCompactions = 0;
         // Rebuild MCP server to avoid "Already connected to a transport" error
         mcpServerConfig = buildMcpServerConfig();
         continue;
@@ -1734,6 +1738,7 @@ async function main(): Promise<void> {
           break;
         }
         clearInterruptRequested();
+        consecutiveCompactions = 0;
         prompt = nextMessage.text;
         promptImages = nextMessage.images;
         containerInput.turnId = generateTurnId();
@@ -1741,7 +1746,8 @@ async function main(): Promise<void> {
       }
 
       // Memory Flush: run an extra query to let agent save durable memories (home containers only)
-      if (needsMemoryFlush && isHome) {
+      // Skip flush when already in a compaction loop — context is too full for productive work.
+      if (needsMemoryFlush && isHome && consecutiveCompactions === 0) {
         needsMemoryFlush = false;
         log('Running memory flush query after compaction...');
 
@@ -1783,13 +1789,93 @@ async function main(): Promise<void> {
       // ── Non-blocking compaction: auto-continue after context compaction ──
       // Instead of waiting for user to send "继续", automatically start a
       // new query so the agent resumes seamlessly where it left off.
+      // The query is tagged with sourceKind='auto_continue' so the host
+      // process can suppress system-maintenance noise (memory flush "OK",
+      // CLAUDE.md update acks, etc.) that leaked into the agent's session
+      // transcript — the host will only forward substantive user-facing
+      // content to IM, preventing the bug described in issue #275.
+      //
+      // Guard: if compaction keeps firing repeatedly (e.g. system prompt alone
+      // nearly fills the context window), stop auto-continuing to avoid an
+      // infinite loop that burns API tokens without producing useful work.
       if (hadCompaction) {
         hadCompaction = false;
-        log('Auto-continuing after compaction (non-blocking)');
-        prompt = '继续';
-        promptImages = undefined;
-        containerInput.turnId = generateTurnId();
-        continue;
+        consecutiveCompactions++;
+        if (consecutiveCompactions <= MAX_CONSECUTIVE_COMPACTIONS) {
+          log(`Auto-continuing after compaction (${consecutiveCompactions}/${MAX_CONSECUTIVE_COMPACTIONS})`);
+          const autoContinuePrompt = [
+            '继续。',
+            '注意：刚刚发生了上下文压缩，系统已自动执行了记忆刷新和 CLAUDE.md 更新（这些是内部维护操作）。',
+            '请**只关注与用户的实际对话**，从压缩前的最后一个对话话题自然衔接。',
+            '如果压缩前你正在进行方案设计、讨论或等待用户确认，请简要回顾当前状态和待确认事项。',
+            '如果压缩前已经在执行中，则继续执行。',
+            '**重要**：不要提及、确认或重复任何系统维护相关的内容（如 "OK"、"已更新 CLAUDE.md"、"记忆已刷新" 等），',
+            '这些内部状态对用户不可见。如果你的回复中确实包含此类内容，请用 <internal>...</internal> 标签包裹。',
+          ].join('');
+          containerInput.turnId = generateTurnId();
+          const autoContResult = await runQuery(
+            autoContinuePrompt,
+            sessionId,
+            mcpServerConfig,
+            containerInput,
+            memoryRecallPrompt,
+            resumeAt,
+            true,
+            DEFAULT_ALLOWED_TOOLS,
+            undefined,
+            undefined,
+            'auto_continue',
+          );
+          if (autoContResult.newSessionId) {
+            sessionId = autoContResult.newSessionId;
+            latestSessionId = sessionId;
+          }
+          if (autoContResult.lastAssistantUuid) {
+            resumeAt = autoContResult.lastAssistantUuid;
+          }
+          if (autoContResult.closedDuringQuery) {
+            log('Close sentinel during auto-continue, exiting');
+            writeOutput({ status: 'closed', result: null });
+            break;
+          }
+          // Handle abnormal states from auto-continue runQuery (these were
+          // previously handled by the main loop's `continue` re-entry; now that
+          // auto-continue is a standalone call we must check them explicitly).
+          if (autoContResult.sessionResumeFailed) {
+            log('WARN: Session resume failed during auto-continue, clearing session');
+            sessionId = undefined;
+            latestSessionId = undefined;
+            resumeAt = undefined;
+            mcpServerConfig = buildMcpServerConfig();
+            // Fall through to wait for next IPC message with a fresh session.
+          }
+          if (autoContResult.unrecoverableTranscriptError) {
+            log('WARN: Unrecoverable transcript error during auto-continue, signaling reset');
+            writeOutput({
+              status: 'error',
+              result: null,
+              error: 'unrecoverable_transcript: 会话历史中包含无法处理的数据，会话需要重置。',
+              newSessionId: sessionId,
+            });
+            process.exit(1);
+          }
+          if (autoContResult.contextOverflow) {
+            log('WARN: Context overflow during auto-continue, will be handled on next query');
+            // Don't retry here — the main loop's overflow-retry logic will
+            // kick in on the next user-initiated query.
+          }
+          if (autoContResult.interruptedDuringQuery) {
+            log('WARN: Auto-continue query was interrupted by user');
+            resumeAt = undefined;
+            try { fs.unlinkSync(IPC_INPUT_INTERRUPT_SENTINEL); } catch { /* ignore */ }
+          }
+          // After auto-continue, fall through to wait for next IPC message.
+        } else {
+          log(`Compaction loop detected (${consecutiveCompactions} consecutive), stopping auto-continue and waiting for user input`);
+          consecutiveCompactions = 0;
+        }
+      } else {
+        consecutiveCompactions = 0;
       }
 
       log('Query ended, waiting for next IPC message...');
