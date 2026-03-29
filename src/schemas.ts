@@ -16,14 +16,15 @@ export const TaskPatchSchema = z.object({
   status: z.enum(['active', 'paused']).optional(),
   next_run: z.string().optional(),
   notify_channels: z
-    .array(z.enum(['feishu', 'telegram', 'qq', 'wechat']))
+    .array(z.enum(['feishu', 'telegram', 'qq', 'wechat', 'dingtalk']))
     .nullable()
     .optional(),
 });
 
 // Cron 表达式校验：5 段（分 时 日 月 周）或 6 段（秒 分 时 日 月 周）
 // 也允许预定义表达式如 @daily, @hourly 等
-const CRON_REGEX = /^(@(yearly|annually|monthly|weekly|daily|hourly|minutely|secondly)|(\S+\s+){4,5}\S+)$/;
+const CRON_REGEX =
+  /^(@(yearly|annually|monthly|weekly|daily|hourly|minutely|secondly)|(\S+\s+){4,5}\S+)$/;
 
 export const TaskCreateSchema = z
   .object({
@@ -564,7 +565,12 @@ export const RedeemCodeSchema = z.object({
 });
 
 // Memory types
-export type MemoryType = 'global' | 'heartbeat' | 'session' | 'date' | 'conversation';
+export type MemoryType =
+  | 'global'
+  | 'heartbeat'
+  | 'session'
+  | 'date'
+  | 'conversation';
 
 export interface MemorySource {
   path: string;

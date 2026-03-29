@@ -850,7 +850,10 @@ function sendImWithFailTracking(
   sendImWithRetry(imJid, text, localImagePaths).catch(() => {});
 }
 
-export function isCursorAfter(candidate: MessageCursor, base: MessageCursor): boolean {
+export function isCursorAfter(
+  candidate: MessageCursor,
+  base: MessageCursor,
+): boolean {
   if (candidate.timestamp > base.timestamp) return true;
   if (candidate.timestamp < base.timestamp) return false;
   return candidate.id > base.id;
@@ -2057,7 +2060,10 @@ export function escapeXml(s: string): string {
     .replace(/"/g, '&quot;');
 }
 
-export function formatMessages(messages: NewMessage[], isShared = false): string {
+export function formatMessages(
+  messages: NewMessage[],
+  isShared = false,
+): string {
   const lines = messages.map((m) => {
     const content = isShared ? `[${m.sender_name}] ${m.content}` : m.content;
     const sourceJid = m.source_jid || m.chat_jid;
@@ -5659,7 +5665,10 @@ async function processAgentConversation(
           );
           logger.info({ replySourceImJid, imSent });
         } else {
-          logger.warn({ chatJid, agentId });
+          logger.warn(
+            { chatJid, agentId },
+            'Partial reply: no replySourceImJid found, skipping IM send',
+          );
         }
         commitCursor();
       } catch (err) {
@@ -6379,24 +6388,34 @@ function buildOnAgentMessage(): (baseChatJid: string, agentId: string) => void {
       logger.info({ virtualChatJid, taskId: `agent-im-restart:${agentId}` });
       queue.closeStdin(virtualChatJid);
       const taskId = `agent-im-restart:${agentId}`;
-      process.stderr.write(
-        `[BOA-IM] virtualChatJid=${virtualChatJid} taskId=${taskId}\n`,
+      logger.debug(
+        { virtualChatJid, taskId },
+        'Agent IM restart: closing stdin and enqueuing task',
       );
       queue.enqueueTask(virtualChatJid, taskId, async () => {
-        process.stderr.write(
-          `[BOA-CB] starting homeChatJid=${homeChatJid} agentId=${agentId}\n`,
+        logger.debug(
+          { homeChatJid, agentId },
+          'Agent IM restart: starting processAgentConversation',
         );
         logger.info({ homeChatJid, agentId, taskId });
         try {
           await processAgentConversation(homeChatJid, agentId);
         } catch (err) {
-          logger.error({ err, homeChatJid, agentId });
+          logger.error(
+            { err, homeChatJid, agentId },
+            'Agent IM restart: processAgentConversation failed',
+          );
         }
       });
     } else {
       // Web-origin: try to pipe into running agent process
-      process.stderr.write(
-        `[BOA-WEB] virtualChatJid=${virtualChatJid} missedMsgs=${missedMessages.length} isImSource=${isImSource}\n`,
+      logger.debug(
+        {
+          virtualChatJid,
+          missedMessages: missedMessages.length,
+          isImSource,
+        },
+        'Web-origin missed messages: attempting to pipe into running agent',
       );
       const formatted =
         missedMessages.length > 0 ? formatMessages(missedMessages, false) : '';
@@ -7016,7 +7035,7 @@ async function main(): Promise<void> {
   // Reload a per-user IM channel (hot-reload on user-im config save)
   const reloadUserIMConfig = async (
     userId: string,
-    channel: 'feishu' | 'telegram' | 'qq' | 'wechat',
+    channel: 'feishu' | 'telegram' | 'qq' | 'wechat' | 'dingtalk',
   ): Promise<boolean> => {
     const homeGroup = getUserHomeGroup(userId);
     if (!homeGroup) {
@@ -7121,6 +7140,39 @@ async function main(): Promise<void> {
       }
       logger.info({ userId }, 'User QQ channel disabled via hot-reload');
       return false;
+    } else if (channel === 'dingtalk') {
+      await imManager.disconnectUserDingTalk(userId);
+      const config = getUserDingTalkConfig(userId);
+      if (
+        config &&
+        config.enabled !== false &&
+        config.clientId &&
+        config.clientSecret
+      ) {
+        const connected = await imManager.connectUserDingTalk(
+          userId,
+          config,
+          onNewChat,
+          {
+            ignoreMessagesBefore,
+            onCommand: handleCommand,
+            resolveGroupFolder: (chatJid: string) =>
+              resolveEffectiveFolder(chatJid),
+            resolveEffectiveChatJid: buildResolveEffectiveChatJid(),
+            onAgentMessage: buildOnAgentMessage(),
+            onBotAddedToGroup: buildOnNewChat(userId, homeFolder),
+            onBotRemovedFromGroup: buildOnBotRemovedFromGroup(),
+            shouldProcessGroupMessage,
+          },
+        );
+        logger.info(
+          { userId, connected },
+          'User DingTalk connection hot-reloaded',
+        );
+        return connected;
+      }
+      logger.info({ userId }, 'User DingTalk channel disabled via hot-reload');
+      return false;
     } else {
       // WeChat
       await imManager.disconnectUserWeChat(userId);
@@ -7189,6 +7241,8 @@ async function main(): Promise<void> {
     isUserQQConnected: (userId: string) => imManager.isQQConnected(userId),
     isUserWeChatConnected: (userId: string) =>
       imManager.isWeChatConnected(userId),
+    isUserDingTalkConnected: (userId: string) =>
+      imManager.isDingTalkConnected(userId),
     processAgentConversation,
     getFeishuChatInfo: (userId: string, chatId: string) =>
       imManager.getFeishuChatInfo(userId, chatId),
