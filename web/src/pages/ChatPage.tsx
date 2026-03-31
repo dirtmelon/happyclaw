@@ -1,16 +1,30 @@
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useChatStore } from '../stores/chat';
 import { useAuthStore } from '../stores/auth';
 import { useGroupsStore } from '../stores/groups';
 import { ChatView } from '../components/chat/ChatView';
 import { ChatGroupItem } from '../components/chat/ChatGroupItem';
+import { ConfirmDialog } from '../components/common';
 import { useSwipeBack } from '../hooks/useSwipeBack';
 
 export function ChatPage() {
   const { groupFolder } = useParams<{ groupFolder?: string }>();
   const navigate = useNavigate();
-  const { groups, currentGroup, selectGroup, loadGroups } = useChatStore();
+  const { groups, currentGroup, selectGroup, loadGroups, clearHistory } = useChatStore();
+
+  const [clearState, setClearState] = useState({ open: false, jid: '', name: '' });
+  const [clearLoading, setClearLoading] = useState(false);
+
+  const handleClearConfirm = async () => {
+    setClearLoading(true);
+    try {
+      const ok = await clearHistory(clearState.jid);
+      if (ok) setClearState({ open: false, jid: '', name: '' });
+    } finally {
+      setClearLoading(false);
+    }
+  };
 
   // Load groups on mount (needed for mobile workspace list)
   useEffect(() => { loadGroups(); }, [loadGroups]);
@@ -96,7 +110,7 @@ export function ChatPage() {
                   isRunning={runnerStates[g.jid] === 'running'}
                   editable={g.editable}
                   onSelect={(jid, folder) => { selectGroup(jid); navigate(`/chat/${folder}`); }}
-                  onClearHistory={() => {}}
+                  onClearHistory={(jid, name) => setClearState({ open: true, jid, name })}
                 />
               ))}
             </div>
@@ -124,7 +138,7 @@ export function ChatPage() {
           />
         </div>
       ) : (
-        <div className="hidden lg:flex flex-1 items-center justify-center bg-white dark:bg-background rounded-t-3xl rounded-b-none mt-5 mr-5 mb-0 ml-3 relative">
+        <div className="hidden lg:flex flex-1 items-center justify-center bg-background rounded-t-3xl rounded-b-none mt-5 mr-5 mb-0 ml-3 relative">
           <div className="text-center max-w-sm">
             {/* Logo */}
             <div className="w-16 h-16 rounded-2xl overflow-hidden mx-auto mb-6">
@@ -139,6 +153,17 @@ export function ChatPage() {
           </div>
         </div>
       )}
+      <ConfirmDialog
+        open={clearState.open}
+        onClose={() => setClearState({ open: false, jid: '', name: '' })}
+        onConfirm={handleClearConfirm}
+        title="重建工作区"
+        message={`确认重建工作区「${clearState.name}」吗？这会清除全部聊天记录、上下文，并删除工作目录中的所有文件。此操作不可撤销。`}
+        confirmText="确认重建"
+        cancelText="取消"
+        confirmVariant="danger"
+        loading={clearLoading}
+      />
     </div>
   );
 }
