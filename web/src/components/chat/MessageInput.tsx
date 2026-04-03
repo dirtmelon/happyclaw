@@ -376,14 +376,14 @@ export function MessageInput({
 
   return (
     <div
-      className="pt-2 pb-6 bg-background ios-pwa-bottom-safe max-lg:bg-background/60 max-lg:backdrop-blur-xl max-lg:saturate-[1.8] max-lg:border-t max-lg:border-border/40"
-      style={{ paddingBottom: `max(1.5rem, var(--keyboard-height, 0px))` }}
+      className="pt-1 pb-3 bg-surface dark:bg-background max-lg:bg-background/60 max-lg:backdrop-blur-xl max-lg:saturate-[1.8] max-lg:border-t max-lg:border-border/40"
+      style={{ paddingBottom: `max(0.75rem, env(safe-area-inset-bottom, 0px), var(--keyboard-height, 0px))` }}
     >
       {/* lg:pl-[60px] = avatar w-8 (32px) + gap-3 (12px) + visual balance (16px), aligns input left edge with message card content */}
       <div className={isCompact ? 'mx-auto px-4' : 'max-w-4xl mx-auto px-4 lg:pl-[60px]'}>
         {/* Upload progress bar */}
         {uploading && uploadProgress && (
-          <div className={`mb-2 px-4 py-2.5 ${isCompact ? 'bg-card border border-border' : 'bg-card rounded-xl border border-border shadow-sm'}`}>
+          <div className={`mb-2 px-4 py-2.5 ${isCompact ? 'bg-surface border border-border' : 'bg-surface rounded-xl border border-border shadow-sm'}`}>
             <div className="flex items-center justify-between mb-1.5">
               <span className="text-xs text-foreground/70 truncate max-w-[65%]">
                 {uploadProgress.currentFile || '完成'}
@@ -405,7 +405,7 @@ export function MessageInput({
         <div className={isCompact ? 'bg-surface border border-border rounded-lg' : 'bg-surface rounded-2xl border border-border shadow-sm'}>
           {/* Send error banner */}
           {sendError && (
-            <div className={`px-4 py-2 bg-red-50 text-red-600 text-xs font-medium border-b border-red-100 flex items-center gap-2 ${isCompact ? 'rounded-t-lg' : 'rounded-t-2xl'}`}>
+            <div className={`px-4 py-2 bg-red-50 dark:bg-red-950/40 text-red-600 dark:text-red-400 text-xs font-medium border-b border-red-100 dark:border-red-800 flex items-center gap-2 ${isCompact ? 'rounded-t-lg' : 'rounded-t-2xl'}`}>
               <span>{sendError}</span>
             </div>
           )}
@@ -486,7 +486,7 @@ export function MessageInput({
             <div className="flex items-center gap-2 px-3 pt-2.5 pb-1.5 border-b border-border">
               <button
                 onClick={() => imageInputRef.current?.click()}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-purple-700 bg-purple-50 hover:bg-purple-100 rounded-lg transition-colors cursor-pointer"
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-purple-700 dark:text-purple-300 bg-purple-50 dark:bg-purple-950/40 hover:bg-purple-100 dark:hover:bg-purple-900/40 rounded-lg transition-colors cursor-pointer"
               >
                 <ImageIcon className="w-3.5 h-3.5" />
                 添加图片
@@ -555,7 +555,7 @@ export function MessageInput({
                 <button
                   type="button"
                   onClick={onResetSession}
-                  className="w-10 h-10 rounded-lg flex items-center justify-center hover:bg-amber-50 text-muted-foreground hover:text-amber-600 transition-all cursor-pointer"
+                  className="w-10 h-10 rounded-lg flex items-center justify-center hover:bg-amber-50 dark:hover:bg-amber-950/40 text-muted-foreground hover:text-amber-600 dark:hover:text-amber-400 transition-all cursor-pointer"
                   title="清除上下文"
                 >
                   <Brush className="w-4.5 h-4.5" />

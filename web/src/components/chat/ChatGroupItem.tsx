@@ -1,4 +1,4 @@
-import { MoreHorizontal, Pencil, Trash2, RotateCcw, Star, Pin } from 'lucide-react';
+import { MoreHorizontal, Pencil, Trash2, RotateCcw, Star, Pin, Timer } from 'lucide-react';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -13,7 +13,7 @@ export interface ChatGroupItemProps {
   name: string;
   folder: string;
   lastMessage?: string;
-  executionMode?: 'container' | 'host';
+
   isShared?: boolean;
   memberRole?: 'owner' | 'member';
   memberCount?: number;
@@ -35,7 +35,6 @@ export function ChatGroupItem({
   name,
   folder,
   lastMessage,
-  executionMode,
   isShared,
   memberRole,
   memberCount,
@@ -66,7 +65,7 @@ export function ChatGroupItem({
       className={cn(
         'group relative rounded-lg mb-0.5 transition-colors',
         isActive
-          ? 'bg-accent dark:bg-accent max-lg:bg-background/70 max-lg:backdrop-blur-lg max-lg:saturate-[1.8] max-lg:border max-lg:border-border/40 max-lg:shadow-[0_8px_32px_rgba(0,0,0,0.06)]'
+          ? 'bg-accent dark:bg-accent max-lg:bg-background/70 max-lg:backdrop-blur-lg max-lg:saturate-[1.8]'
           : 'hover:bg-accent/50',
       )}
     >
@@ -74,16 +73,19 @@ export function ChatGroupItem({
         onClick={() => onSelect(jid, folder)}
         className="w-full text-left px-3 pr-12 py-2.5 cursor-pointer"
       >
-        <div className="flex items-center gap-1.5">
+        <div className="flex items-center gap-1.5 min-w-0">
           {isHome && (
             <Star className="w-3.5 h-3.5 text-yellow-500 fill-yellow-500 flex-shrink-0" />
           )}
           {isPinned && !isHome && (
             <Pin className="w-3 h-3 text-primary flex-shrink-0" />
           )}
+          {folder?.startsWith('task-') && (
+            <Timer className="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" />
+          )}
           <span
             className={cn(
-              'text-sm truncate',
+              'text-sm truncate min-w-0',
               isActive ? 'font-semibold text-foreground' : 'text-muted-foreground',
             )}
           >
@@ -95,22 +97,13 @@ export function ChatGroupItem({
               <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500" />
             </span>
           )}
-          {executionMode === 'host' ? (
-            <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-100 text-amber-700">
-              宿主机
-            </span>
-          ) : executionMode === 'container' ? (
-            <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-sky-100 text-sky-700">
-              Docker
-            </span>
-          ) : null}
           {isShared && memberRole === 'owner' && (memberCount ?? 0) >= 2 && (
-            <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-purple-100 text-purple-700">
+            <span className="flex-shrink-0 whitespace-nowrap inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-purple-100 dark:bg-purple-900/40 text-purple-700 dark:text-purple-300">
               Owner
             </span>
           )}
           {isShared && memberRole !== 'owner' && (memberCount ?? 0) >= 2 && (
-            <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-violet-100 text-violet-700">
+            <span className="flex-shrink-0 whitespace-nowrap inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-violet-100 dark:bg-violet-900/40 text-violet-700 dark:text-violet-300">
               {memberCount}人协作
             </span>
           )}
@@ -153,7 +146,7 @@ export function ChatGroupItem({
             )}
             <DropdownMenuItem
               onClick={() => onClearHistory(jid, displayName)}
-              className="text-amber-700 focus:text-amber-700"
+              className="text-amber-700 dark:text-amber-400 focus:text-amber-700 dark:focus:text-amber-400"
             >
               <RotateCcw className="w-4 h-4" />
               重建工作区

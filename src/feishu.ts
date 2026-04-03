@@ -821,13 +821,16 @@ export function createFeishuConnection(
   async function sendTextToChat(chatId: string, text: string): Promise<void> {
     if (!client) return;
     try {
-      await client.im.message.create({
+      const receive_id_type = chatId.startsWith('oc_')
+        ? 'chat_id'
+        : 'open_id';
+      await client.im.v1.message.create({
+        params: { receive_id_type },
         data: {
           receive_id: chatId,
           msg_type: 'text',
           content: JSON.stringify({ text }),
         },
-        params: { receive_id_type: 'chat_id' },
       });
     } catch (err) {
       logger.error({ chatId, err }, 'Failed to send Feishu text reply');
@@ -1566,6 +1569,35 @@ export function createFeishuConnection(
       };
 
       try {
+        // Detect pre-built Feishu interactive card JSON — send directly without wrapping
+        if (text.startsWith('{"type":"interactive"')) {
+          try {
+            const parsed = JSON.parse(text);
+            if (parsed.type === 'interactive' && parsed.card) {
+              const lastMsgId = lastMessageIdByChat.get(chatId);
+              if (lastMsgId) {
+                await client.im.message.reply({
+                  path: { message_id: lastMsgId },
+                  data: { content: text, msg_type: 'interactive' },
+                });
+              } else {
+                await client.im.v1.message.create({
+                  params: { receive_id_type: 'chat_id' },
+                  data: {
+                    receive_id: chatId,
+                    msg_type: 'interactive',
+                    content: text,
+                  },
+                });
+              }
+              clearAckReaction();
+              return;
+            }
+          } catch {
+            // Not valid card JSON, fall through to normal handling
+          }
+        }
+
         // Count markdown tables to decide format upfront — Feishu cards have a table limit
         // Each table has exactly one separator row (e.g. |---|---|), so counting those = table count
         const tableCount = (text.match(/^\|[\s:-]+\|/gm) || []).length;

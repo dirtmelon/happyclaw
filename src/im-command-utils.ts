@@ -99,6 +99,14 @@ export interface LocationInfo {
   replyPolicy: string | null;
 }
 
+export interface BoundChatTarget {
+  baseChatJid: string;
+  targetChatJid: string;
+  folder: string;
+  agentId: string | null;
+  locationLine: string;
+}
+
 export interface RegisteredGroupLike {
   folder: string;
   name: string;
@@ -146,6 +154,55 @@ export function resolveLocationInfo(
     : null;
 
   return { locationLine, folder, replyPolicy };
+}
+
+/**
+ * Resolve the real chat target for IM slash commands.
+ *
+ * Non-main workspaces use random web JIDs (`web:<uuid>`), so commands must not
+ * reconstruct targets from `folder`. They need the actual bound workspace JID.
+ */
+export function resolveBoundChatTarget(
+  sourceChatJid: string,
+  group: RegisteredGroupLike,
+  getRegisteredGroup: (jid: string) => RegisteredGroupLike | undefined,
+  getAgent: (id: string) => AgentLike | undefined,
+  findGroupNameByFolder: (folder: string) => string,
+): BoundChatTarget {
+  if (group.target_agent_id) {
+    const agent = getAgent(group.target_agent_id);
+    const parent = agent ? getRegisteredGroup(agent.chat_jid) : undefined;
+    const workspaceName =
+      parent?.name || findGroupNameByFolder(parent?.folder || group.folder);
+    const baseChatJid = agent?.chat_jid || sourceChatJid;
+    return {
+      baseChatJid,
+      targetChatJid: `${baseChatJid}#agent:${group.target_agent_id}`,
+      folder: parent?.folder || group.folder,
+      agentId: group.target_agent_id,
+      locationLine: `${workspaceName} / ${agent?.name || group.target_agent_id}`,
+    };
+  }
+
+  if (group.target_main_jid) {
+    const target = getRegisteredGroup(group.target_main_jid);
+    return {
+      baseChatJid: group.target_main_jid,
+      targetChatJid: group.target_main_jid,
+      folder: target?.folder || group.folder,
+      agentId: null,
+      locationLine: `${target?.name || group.target_main_jid} / 主对话`,
+    };
+  }
+
+  const workspaceName = findGroupNameByFolder(group.folder);
+  return {
+    baseChatJid: sourceChatJid,
+    targetChatJid: sourceChatJid,
+    folder: group.folder,
+    agentId: null,
+    locationLine: `${workspaceName} / 主对话`,
+  };
 }
 
 // ─── System Status Formatting ─────────────────────────────────

@@ -50,15 +50,18 @@ function clearSessionFiles(folder: string, agentId?: string): void {
 // ─── Core reset ─────────────────────────────────────────────────
 
 export async function executeSessionReset(
-  chatJid: string,
+  baseChatJid: string,
   folder: string,
   deps: CommandDeps,
   agentId?: string,
 ): Promise<void> {
+  const targetJid = agentId
+    ? `${baseChatJid}#agent:${agentId}`
+    : baseChatJid;
+
   if (agentId) {
     // Agent-specific reset: only stop the agent's virtual JID process
-    const virtualJid = `web:${folder}#agent:${agentId}`;
-    await deps.queue.stopGroup(virtualJid, { force: true });
+    await deps.queue.stopGroup(targetJid, { force: true });
   } else {
     // Main session reset: stop all processes for this folder
     const siblingJids = getJidsByFolder(folder);
@@ -77,7 +80,6 @@ export async function executeSessionReset(
   }
 
   // 4. Insert context_reset divider message into the correct JID
-  const targetJid = agentId ? `web:${folder}#agent:${agentId}` : chatJid;
   const dividerMessageId = crypto.randomUUID();
   const timestamp = new Date().toISOString();
   ensureChatExists(targetJid);
@@ -104,8 +106,7 @@ export async function executeSessionReset(
   // 5. Advance lastAgentTimestamp so old messages before the reset are not
   //    re-sent to the next fresh agent session.
   if (agentId) {
-    const virtualJid = `web:${folder}#agent:${agentId}`;
-    deps.setLastAgentTimestamp(virtualJid, { timestamp, id: dividerMessageId });
+    deps.setLastAgentTimestamp(targetJid, { timestamp, id: dividerMessageId });
   } else {
     const siblingJids = getJidsByFolder(folder);
     for (const siblingJid of siblingJids) {
@@ -116,5 +117,8 @@ export async function executeSessionReset(
     }
   }
 
-  logger.info({ chatJid, folder, agentId }, 'Session reset via /clear command');
+  logger.info(
+    { baseChatJid, targetJid, folder, agentId },
+    'Session reset via /clear command',
+  );
 }

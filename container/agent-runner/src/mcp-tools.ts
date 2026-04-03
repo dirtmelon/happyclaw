@@ -29,16 +29,19 @@ export interface McpContext {
 }
 
 function writeIpcFile(dir: string, data: object): string {
-  fs.mkdirSync(dir, { recursive: true });
-
   const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`;
   const filepath = path.join(dir, filename);
-
-  // Atomic write: temp file then rename
   const tempPath = `${filepath}.tmp`;
-  fs.writeFileSync(tempPath, JSON.stringify(data, null, 2));
-  fs.renameSync(tempPath, filepath);
-
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    // Atomic write: temp file then rename
+    fs.writeFileSync(tempPath, JSON.stringify(data, null, 2));
+    fs.renameSync(tempPath, filepath);
+  } catch (err) {
+    // Clean up temp file on failure
+    try { fs.unlinkSync(tempPath); } catch { /* ignore */ }
+    throw new Error(`IPC 写入失败 (${dir}): ${err instanceof Error ? err.message : String(err)}`);
+  }
   return filename;
 }
 
@@ -180,7 +183,7 @@ export function createMcpTools(ctx: McpContext): SdkMcpToolDefinition<any>[] {
     // --- send_image ---
     tool(
       'send_image',
-      "Send an image file from the workspace to the user or group via IM (Feishu/Telegram). The file must be an image (PNG, JPEG, GIF, WebP, etc.) and must exist in the workspace. Use this when you've generated or downloaded an image and want to share it with the user. Optionally include a caption.",
+      "Send an image file from the workspace to the user or group via IM (Feishu/Telegram/DingTalk). The file must be an image (PNG, JPEG, GIF, WebP, etc.) and must exist in the workspace. Use this when you've generated or downloaded an image and want to share it with the user. Optionally include a caption.",
       {
         file_path: z
           .string()
@@ -193,18 +196,10 @@ export function createMcpTools(ctx: McpContext): SdkMcpToolDefinition<any>[] {
           .describe('Optional caption text to send with the image'),
       },
       async (args) => {
-        // Web channels don't support direct image sending
-        if (ctx.chatJid.startsWith('web:')) {
-          return {
-            content: [
-              {
-                type: 'text' as const,
-                text: 'Error: send_image is not supported for Web channels. Images can only be sent to IM channels (Feishu/Telegram).',
-              },
-            ],
-            isError: true,
-          };
-        }
+        // NOTE: Web-prefixed JIDs (e.g. web:main) are no longer rejected here.
+        // The main process routes the image to the correct IM channel via
+        // activeImReplyRoutes, so the agent-runner should let the IPC
+        // request through regardless of JID prefix.
 
         // Resolve path relative to workspace
         const absPath = path.isAbsolute(args.file_path)
@@ -311,8 +306,8 @@ export function createMcpTools(ctx: McpContext): SdkMcpToolDefinition<any>[] {
     // --- send_file ---
     tool(
       'send_file',
-      `Send a file to the current chat (the user you're talking to) via IM (Feishu/Telegram). The file path is relative to the workspace/group directory.
-Supports: PDF, DOC, XLS, PPT, MP4, etc. Max file size: 30MB.`,
+      `Send a file to the current chat (the user you're talking to) via IM (Feishu/Telegram/DingTalk). The file path is relative to the workspace/group directory.
+Supports: PDF, DOC, XLS, PPT, MP4, ZIP, SO, etc. Max file size: 30MB.`,
       {
         filePath: z
           .string()
@@ -324,18 +319,10 @@ Supports: PDF, DOC, XLS, PPT, MP4, etc. Max file size: 30MB.`,
           .describe('File name to display (e.g., "report.pdf")'),
       },
       async (args) => {
-        // Web channels don't support direct file sending
-        if (ctx.chatJid.startsWith('web:')) {
-          return {
-            content: [
-              {
-                type: 'text' as const,
-                text: 'Error: send_file is not supported for Web channels. Files can only be sent to IM channels (Feishu/Telegram).',
-              },
-            ],
-            isError: true,
-          };
-        }
+        // NOTE: Web-prefixed JIDs (e.g. web:main) are no longer rejected here.
+        // The main process routes the file to the correct IM channel via
+        // activeImReplyRoutes, so the agent-runner should let the IPC
+        // request through regardless of JID prefix.
 
         // Handle both absolute and relative paths
         let resolvedPath: string;
@@ -427,6 +414,11 @@ EXECUTION TYPE:
 \u2022 "agent" (default): Task runs as a full Claude Agent with access to all tools. Consumes API tokens.
 \u2022 "script" (admin only): Task runs a shell command directly on the host. Zero API token cost. Use for deterministic tasks like health checks, data collection, cURL calls, or cron-like scripts.
 
+EXECUTION MODE:
+\u2022 "host": Task runs directly on the host machine. Admin only.
+\u2022 "container" (default for non-admin): Task runs in a Docker container.
+Each agent task automatically gets its own dedicated workspace.
+
 CONTEXT MODE (agent mode only) - Choose based on task type:
 \u2022 "group": Task runs in the group's conversation context, with access to chat history.
 \u2022 "isolated": Task runs in a fresh session with no conversation history.
@@ -470,11 +462,17 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
           .describe(
             'Shell command to execute (required for script mode). Runs in the group workspace directory.',
           ),
+        execution_mode: z
+          .enum(['host', 'container'])
+          .optional()
+          .describe(
+            'Execution mode: host runs directly on the server, container runs in Docker isolation',
+          ),
         context_mode: z
           .enum(['group', 'isolated'])
-          .default('isolated')
+          .default('group')
           .describe(
-            '(agent mode only) isolated=fresh session (recommended), group=runs with chat history (may block on active sessions)',
+            '(agent mode only) group=runs with persistent workspace context (recommended), isolated=fresh session each time',
           ),
         target_group_jid: z
           .string()
@@ -524,7 +522,7 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
         // Validate schedule_value before writing IPC
         if (args.schedule_type === 'cron') {
           try {
-            CronExpressionParser.parse(args.schedule_value);
+            CronExpressionParser.parse(args.schedule_value, { tz: process.env.TZ || 'Asia/Shanghai' });
           } catch {
             return {
               content: [
@@ -581,6 +579,9 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
         };
         if (execType === 'script') {
           data.script_command = args.script_command;
+        }
+        if (args.execution_mode) {
+          data.execution_mode = args.execution_mode;
         }
         const filename = writeIpcFile(TASKS_DIR, data);
         const modeLabel = execType === 'script' ? 'script' : 'agent';

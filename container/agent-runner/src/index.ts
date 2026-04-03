@@ -491,6 +491,13 @@ function createPreCompactHook(
     const transcriptPath = preCompact.transcript_path;
     const sessionId = preCompact.session_id;
 
+    // Skip sub-agent compactions — they'd archive the unchanged main transcript
+    // and set hadCompaction, triggering spurious auto-continue + memory flush (#321)
+    if (preCompact.agent_id) {
+      log(`PreCompact: skipping sub-agent compact (agent_id=${preCompact.agent_id})`);
+      return {};
+    }
+
     // ── Flush accumulated streaming text as compact_partial ──
     // This ensures users see the partial response even after compaction.
     const partialText = deps.getFullText();
@@ -1124,6 +1131,13 @@ async function runQuery(
     '这样用户无需等待，可以继续与你交流其他事项。',
     '任务结束时你会自动收到通知，届时在对话中向用户汇报即可。',
     '告知用户：「已为您在后台启动该任务，完成后我会第一时间反馈。现在有其他问题也可以随时问我。」',
+    '',
+    '### 任务通知处理（重要）',
+    '',
+    '当你收到多条后台任务的完成或失败通知时：',
+    '- **禁止逐条回复**。不要对每条通知都调用 `send_message`，这会导致 IM 群刷屏。',
+    '- **等待所有通知到齐后，汇总为一条消息回复用户**，例如：「N 个任务完成，M 个失败，失败原因：...」',
+    '- 对于已知的无害失败（如浏览器进程被回收、临时资源超时），**不需要通知用户**，静默忽略即可。',
   ].join('\n');
 
   // Interaction guidelines to prevent the agent from confusing MCP tool
@@ -1603,7 +1617,15 @@ async function main(): Promise<void> {
   let prompt = containerInput.prompt;
   let promptImages = containerInput.images;
   if (containerInput.isScheduledTask) {
-    prompt = `[定时任务 - 以下内容由系统自动发送，并非来自用户或群组的直接消息。]\n\n${prompt}`;
+    const scheduledTaskPrefixLines = [
+      '[定时任务 - 以下内容由系统自动发送，并非来自用户或群组的直接消息。]',
+      '',
+      '重要：你正在定时任务模式下运行。你的最终输出不会自动发送给用户。你必须使用 mcp__happyclaw__send_message 工具来发送消息，否则用户将收不到任何内容。',
+      '',
+      '注意：只在完成任务后调用一次 send_message 发送最终结果，不要发送中间状态或重复消息。',
+    ];
+    const scheduledTaskPrefix = scheduledTaskPrefixLines.join('\n');
+    prompt = scheduledTaskPrefix + '\n\n' + prompt;
   }
   const pendingDrain = drainIpcInput();
   if (pendingDrain.messages.length > 0) {

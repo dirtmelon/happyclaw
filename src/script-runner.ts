@@ -70,7 +70,7 @@ export async function runScript(
           resolve({
             stdout: stdout.slice(0, MAX_BUFFER),
             stderr: stderr.slice(0, MAX_BUFFER),
-            exitCode: timedOut ? null : (child.exitCode ?? 0),
+            exitCode: timedOut ? null : (child.exitCode ?? (error ? 1 : 0)),
             timedOut,
             durationMs,
           });

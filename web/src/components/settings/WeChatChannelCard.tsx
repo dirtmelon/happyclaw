@@ -3,7 +3,7 @@ import { Loader2, LogOut, QrCode, Shield, Smartphone } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { Button } from '@/components/ui/button';
-import { ToggleSwitch } from '@/components/ui/toggle-switch';
+import { Switch } from '@/components/ui/switch';
 import { api } from '../../api/client';
 import { getErrorMessage } from './types';
 import { WeChatQRDialog } from './WeChatQRDialog';
@@ -102,7 +102,7 @@ export function WeChatChannelCard() {
               <p className="text-xs text-muted-foreground mt-0.5">通过微信 iLink Bot 接收和回复消息</p>
             </div>
           </div>
-          <ToggleSwitch checked={enabled} disabled={loading || toggling} onChange={handleToggle} />
+          <Switch checked={enabled} disabled={loading || toggling} onCheckedChange={handleToggle} />
         </div>
 
         <div className={`px-5 py-4 space-y-4 transition-opacity ${!enabled ? 'opacity-50 pointer-events-none' : ''}`}>
@@ -124,7 +124,7 @@ export function WeChatChannelCard() {
                         size="sm"
                         onClick={handleDisconnect}
                         disabled={disconnecting}
-                        className="text-red-600 hover:text-red-700 hover:bg-red-50 border-red-200"
+                        className="text-red-600 dark:text-red-400 hover:text-red-700 dark:hover:text-red-300 hover:bg-red-50 dark:hover:bg-red-950/40 border-red-200 dark:border-red-800"
                       >
                         {disconnecting ? <Loader2 className="size-3.5 animate-spin" /> : <LogOut className="size-3.5" />}
                         退出登录
@@ -179,10 +179,10 @@ export function WeChatChannelCard() {
                     </p>
                   </div>
                 </div>
-                <ToggleSwitch
+                <Switch
                   checked={bypassProxy}
                   disabled={togglingProxy}
-                  onChange={handleBypassProxyToggle}
+                  onCheckedChange={handleBypassProxyToggle}
                 />
               </div>
             </>

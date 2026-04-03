@@ -57,7 +57,6 @@ import { logger } from '../logger.js';
 import {
   getContainerEnvConfig,
   saveContainerEnvConfig,
-  deleteContainerEnvConfig,
   toPublicContainerEnvConfig,
 } from '../runtime-config.js';
 import {
@@ -269,26 +268,8 @@ function buildGroupsPayload(user: AuthUser): Record<string, GroupPayloadItem> {
   return result;
 }
 
-function removeFlowArtifacts(folder: string): void {
-  fs.rmSync(path.join(GROUPS_DIR, folder), { recursive: true, force: true });
-  fs.rmSync(path.join(DATA_DIR, 'sessions', folder), {
-    recursive: true,
-    force: true,
-  });
-  fs.rmSync(path.join(DATA_DIR, 'ipc', folder), {
-    recursive: true,
-    force: true,
-  });
-  fs.rmSync(path.join(DATA_DIR, 'env', folder), {
-    recursive: true,
-    force: true,
-  });
-  fs.rmSync(path.join(DATA_DIR, 'memory', folder), {
-    recursive: true,
-    force: true,
-  });
-  deleteContainerEnvConfig(folder);
-}
+import { removeFlowArtifacts } from '../file-manager.js';
+export { removeFlowArtifacts };
 
 function clearSessionJsonlFiles(folder: string, agentId?: string): void {
   const claudeDir = agentId

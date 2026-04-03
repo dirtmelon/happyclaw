@@ -247,6 +247,18 @@ export class GroupQueue {
     return state?.active === true;
   }
 
+  /** Count active task runners whose JID starts with the given base JID + '#task:' */
+  countActiveTaskRunners(baseJid: string): number {
+    const prefix = baseJid + '#task:';
+    let count = 0;
+    for (const [jid, state] of this.groups.entries()) {
+      if (state.active && jid.startsWith(prefix)) {
+        count++;
+      }
+    }
+    return count;
+  }
+
   /**
    * Returns true if the active runner for this group (or its serialization
    * sibling) is currently executing a scheduled task rather than user messages.

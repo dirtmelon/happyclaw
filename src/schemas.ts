@@ -11,26 +11,36 @@ export const TaskPatchSchema = z.object({
   schedule_value: z.string().optional(),
   context_mode: z.enum(['group', 'isolated']).optional(),
   execution_type: z.enum(['agent', 'script']).optional(),
+  execution_mode: z.enum(['host', 'container']).optional(),
   script_command: z.string().max(4096).nullable().optional(),
   status: z.enum(['active', 'paused']).optional(),
   next_run: z.string().optional(),
-  notify_channels: z.array(z.enum(['feishu', 'telegram', 'qq', 'wechat'])).nullable().optional(),
+  notify_channels: z
+    .array(z.enum(['feishu', 'telegram', 'qq', 'wechat', 'dingtalk']))
+    .nullable()
+    .optional(),
 });
 
-// 简单 cron 表达式验证：5 或 6 段，每段允许 * 和常见 cron 语法
-const CRON_REGEX = /^(\S+\s+){4,5}\S+$/;
+// Cron 表达式校验：5 段（分 时 日 月 周）或 6 段（秒 分 时 日 月 周）
+// 也允许预定义表达式如 @daily, @hourly 等
+const CRON_REGEX =
+  /^(@(yearly|annually|monthly|weekly|daily|hourly|minutely|secondly)|(\S+\s+){4,5}\S+)$/;
 
 export const TaskCreateSchema = z
   .object({
-    group_folder: z.string().min(1),
-    chat_jid: z.string().min(1),
+    group_folder: z.string().min(1).optional(),
+    chat_jid: z.string().min(1).optional(),
     prompt: z.string().optional().default(''),
     schedule_type: z.enum(['cron', 'interval', 'once']),
     schedule_value: z.string().min(1),
     context_mode: z.enum(['group', 'isolated']).optional(),
     execution_type: z.enum(['agent', 'script']).optional(),
+    execution_mode: z.enum(['host', 'container']).optional(),
     script_command: z.string().max(4096).optional(),
-    notify_channels: z.array(z.enum(['feishu', 'telegram', 'qq', 'wechat'])).nullable().optional(),
+    notify_channels: z
+      .array(z.enum(['feishu', 'telegram', 'qq', 'wechat', 'dingtalk']))
+      .nullable()
+      .optional(),
   })
   .superRefine((data, ctx) => {
     const execType = data.execution_type || 'agent';
@@ -556,7 +566,12 @@ export const RedeemCodeSchema = z.object({
 });
 
 // Memory types
-export type MemoryType = 'global' | 'heartbeat' | 'session' | 'date' | 'conversation';
+export type MemoryType =
+  | 'global'
+  | 'heartbeat'
+  | 'session'
+  | 'date'
+  | 'conversation';
 
 export interface MemorySource {
   path: string;
@@ -689,3 +704,19 @@ export const WeChatConfigSchema = z.object({
   clearBotToken: z.boolean().optional(),
   bypassProxy: z.boolean().optional(),
 });
+
+export const DingTalkConfigSchema = z
+  .object({
+    clientId: z.string().max(2000).optional(),
+    clientSecret: z.string().max(2000).optional(),
+    clearClientSecret: z.boolean().optional(),
+    enabled: z.boolean().optional(),
+  })
+  .refine(
+    (data) =>
+      typeof data.clientId === 'string' ||
+      typeof data.clientSecret === 'string' ||
+      data.clearClientSecret === true ||
+      typeof data.enabled === 'boolean',
+    { message: 'At least one config field must be provided' },
+  );

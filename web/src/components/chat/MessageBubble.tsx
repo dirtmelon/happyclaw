@@ -32,15 +32,15 @@ function ReasoningBlock({ content }: { content: string }) {
   const [expanded, setExpanded] = useState(false);
 
   return (
-    <div className="mb-3 rounded-xl border border-amber-200/60 bg-amber-50/40 overflow-hidden">
+    <div className="mb-3 rounded-xl border border-amber-200/60 dark:border-amber-700/40 bg-amber-50/40 dark:bg-amber-950/30 overflow-hidden">
       <button
         onClick={() => setExpanded(!expanded)}
-        className="w-full flex items-center gap-2 px-3 py-2 pr-16 text-left hover:bg-amber-50/60 transition-colors"
+        className="w-full flex items-center gap-2 px-3 py-2 pr-16 text-left hover:bg-amber-50/60 dark:hover:bg-amber-950/40 transition-colors"
       >
         <svg className="w-4 h-4 text-amber-500 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
           <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.455 2.456L21.75 6l-1.036.259a3.375 3.375 0 00-2.455 2.456z" />
         </svg>
-        <span className="text-xs font-medium text-amber-700">Reasoning</span>
+        <span className="text-xs font-medium text-amber-700 dark:text-amber-300">Reasoning</span>
         <span className="flex-1" />
         {expanded ? (
           <ChevronUp className="w-3.5 h-3.5 text-amber-400" />
@@ -49,7 +49,7 @@ function ReasoningBlock({ content }: { content: string }) {
         )}
       </button>
       {expanded && (
-        <div className="px-3 pb-3 text-sm text-amber-900/70 whitespace-pre-wrap break-words max-h-64 overflow-y-auto border-t border-amber-100">
+        <div className="px-3 pb-3 text-sm text-amber-900/70 dark:text-amber-300/70 whitespace-pre-wrap break-words max-h-64 overflow-y-auto border-t border-amber-100 dark:border-amber-800/40">
           {content}
         </div>
       )}
@@ -209,14 +209,14 @@ export const MessageBubble = memo(function MessageBubble({ message, showTime, th
             <span className="text-xs font-medium text-red-600">系统消息</span>
           </div>
         )}
-        <div className="relative bg-red-50 rounded-xl border border-red-200 border-l-[3px] border-l-red-500 px-5 py-4">
+        <div className="relative bg-red-50 dark:bg-red-950/30 rounded-xl border border-red-200 dark:border-red-800/60 border-l-[3px] border-l-red-500 px-5 py-4">
           <div className="flex items-start gap-3">
             <div className="flex-shrink-0 w-6 h-6 bg-red-500 rounded-full flex items-center justify-center text-white font-bold text-sm">
               !
             </div>
             <div className="flex-1">
-              <h3 className="text-sm font-semibold text-red-900 mb-1">上下文溢出错误</h3>
-              <p className="text-sm text-red-800 leading-relaxed">{errorMsg}</p>
+              <h3 className="text-sm font-semibold text-red-900 dark:text-red-200 mb-1">上下文溢出错误</h3>
+              <p className="text-sm text-red-800 dark:text-red-300 leading-relaxed">{errorMsg}</p>
             </div>
           </div>
         </div>
@@ -435,7 +435,7 @@ export const MessageBubble = memo(function MessageBubble({ message, showTime, th
     const showSenderLabel = isShared;
     return (
       <div className="group flex justify-end mb-4">
-        <div className="flex flex-col items-end min-w-0 w-full">
+        <div className="flex flex-col items-end min-w-0 max-w-[75%]">
           {showSenderLabel && (
             <span className="text-xs text-muted-foreground font-medium mb-1 mr-1">
               {message.sender_name || currentUser?.display_name || currentUser?.username || '我'}
@@ -457,7 +457,7 @@ export const MessageBubble = memo(function MessageBubble({ message, showTime, th
               </div>
             )}
             {!hasOnlyImages && (
-              <div className="bg-primary/10 text-foreground px-4 py-2.5 rounded-2xl rounded-tr-sm shadow-sm">
+              <div className="bg-muted text-foreground px-4 py-2.5 rounded-2xl rounded-tr-sm">
                 <p className="text-[15px] leading-relaxed whitespace-pre-wrap break-words">{message.content}</p>
               </div>
             )}
@@ -524,37 +524,9 @@ export const MessageBubble = memo(function MessageBubble({ message, showTime, th
             {showTime && <span className="text-xs text-muted-foreground">{time}</span>}
           </div>
 
-          {/* Card */}
-          <div className="relative bg-surface rounded-xl border border-border/60 px-5 py-4 max-lg:bg-surface/90 max-lg:backdrop-blur-sm overflow-hidden font-serif shadow-card">
-            {/* Action buttons */}
-            <div className="absolute top-2 right-2 flex items-center gap-0.5 lg:opacity-0 lg:group-hover:opacity-100 transition-opacity">
-              <button
-                onClick={() => setShowShareDialog(true)}
-                className="w-7 h-7 rounded-md flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-foreground/10 max-lg:hidden cursor-pointer"
-                title="分享图片"
-                aria-label="生成分享图片"
-              >
-                <ImageDown className="w-4 h-4" />
-              </button>
-              <button
-                onClick={handleCopy}
-                className="w-7 h-7 rounded-md flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-foreground/10 max-lg:hidden cursor-pointer"
-                title="复制"
-                aria-label="复制消息"
-              >
-                {copied ? <Check className="w-4 h-4 text-primary" /> : <Copy className="w-4 h-4" />}
-              </button>
-              <button
-                onClick={handleMenuButton}
-                className="w-7 h-7 rounded-md flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-foreground/10 cursor-pointer"
-                title="更多"
-                aria-label="消息菜单"
-              >
-                <Ellipsis className="w-4 h-4" />
-              </button>
-            </div>
-
-            {/* Reasoning block */}
+          {/* Claude-style: no card container, direct content */}
+          <div className="overflow-hidden font-serif">
+            {/* Reasoning block — muted left border style */}
             {thinkingContent && <ReasoningBlock content={thinkingContent} />}
 
             {/* Image attachments */}
@@ -583,6 +555,34 @@ export const MessageBubble = memo(function MessageBubble({ message, showTime, th
             {message.is_from_me && message.token_usage && (
               <TokenUsageDisplay tokenUsageJson={message.token_usage} />
             )}
+          </div>
+
+          {/* Action toolbar — below content, Claude-style */}
+          <div className="flex items-center gap-0.5 mt-1 lg:opacity-0 lg:group-hover:opacity-100 transition-opacity">
+            <button
+              onClick={handleCopy}
+              className="h-7 px-2 rounded-md flex items-center gap-1 text-muted-foreground hover:text-foreground hover:bg-foreground/5 text-xs cursor-pointer transition-colors"
+              title="复制"
+              aria-label="复制消息"
+            >
+              {copied ? <Check className="w-3.5 h-3.5 text-primary" /> : <Copy className="w-3.5 h-3.5" />}
+            </button>
+            <button
+              onClick={() => setShowShareDialog(true)}
+              className="h-7 px-2 rounded-md flex items-center gap-1 text-muted-foreground hover:text-foreground hover:bg-foreground/5 text-xs max-lg:hidden cursor-pointer transition-colors"
+              title="分享"
+              aria-label="生成分享图片"
+            >
+              <ImageDown className="w-3.5 h-3.5" />
+            </button>
+            <button
+              onClick={handleMenuButton}
+              className="h-7 px-2 rounded-md flex items-center gap-1 text-muted-foreground hover:text-foreground hover:bg-foreground/5 text-xs cursor-pointer transition-colors"
+              title="更多"
+              aria-label="消息菜单"
+            >
+              <Ellipsis className="w-3.5 h-3.5" />
+            </button>
           </div>
         </div>
       </div>

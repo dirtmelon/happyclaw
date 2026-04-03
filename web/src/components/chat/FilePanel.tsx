@@ -214,7 +214,7 @@ function TextEditor({
       onClick={onClose}
     >
       <div
-        className="bg-card rounded-xl shadow-xl w-full max-w-4xl h-[85vh] supports-[height:100dvh]:h-[85dvh] flex flex-col animate-in zoom-in-95 duration-200"
+        className="bg-surface rounded-xl shadow-xl w-full max-w-4xl h-[85vh] supports-[height:100dvh]:h-[85dvh] flex flex-col animate-in zoom-in-95 duration-200"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
@@ -372,7 +372,7 @@ function MarkdownFileViewer({
       style={{ touchAction: 'none' }}
     >
       <div
-        className="bg-card w-full h-full sm:rounded-xl sm:shadow-xl sm:max-w-4xl sm:h-[90vh] sm:supports-[height:100dvh]:h-[90dvh] flex flex-col sm:animate-in sm:zoom-in-95 sm:duration-200"
+        className="bg-surface w-full h-full sm:rounded-xl sm:shadow-xl sm:max-w-4xl sm:h-[90vh] sm:supports-[height:100dvh]:h-[90dvh] flex flex-col sm:animate-in sm:zoom-in-95 sm:duration-200"
         style={{ maxHeight: '100dvh' }}
       >
         {/* Header */}
@@ -702,7 +702,7 @@ export function FilePanel({ groupJid, onClose }: FilePanelProps) {
       </div>
 
       {openDirError && (
-        <div className="px-4 py-2 border-b border-red-100 bg-red-50 text-xs text-red-600">
+        <div className="px-4 py-2 border-b border-red-100 dark:border-red-800 bg-red-50 dark:bg-red-950/40 text-xs text-red-600 dark:text-red-400">
           {openDirError}
         </div>
       )}
@@ -796,7 +796,7 @@ export function FilePanel({ groupJid, onClose }: FilePanelProps) {
                           e.stopPropagation();
                           handleDeleteClick(item);
                         }}
-                        className="p-2.5 rounded hover:bg-red-100 text-muted-foreground hover:text-red-600 transition-colors cursor-pointer"
+                        className="p-2.5 rounded hover:bg-red-100 dark:hover:bg-red-950/40 text-muted-foreground hover:text-red-600 dark:hover:text-red-400 transition-colors cursor-pointer"
                         title="删除"
                         aria-label="删除文件"
                       >

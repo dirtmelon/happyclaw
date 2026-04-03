@@ -107,7 +107,27 @@ export interface SystemSettings {
   billingCurrencyRate: number;
 }
 
-export type SettingsTab = 'claude' | 'registration' | 'appearance' | 'system' | 'profile' | 'my-channels' | 'security' | 'groups' | 'memory' | 'skills' | 'mcp-servers' | 'agent-definitions' | 'users' | 'about' | 'bindings';
+// ─── OAuth Usage ────────────────────────────────────────────
+
+export interface OAuthUsageBucket {
+  utilization: number;
+  resets_at: string;
+}
+
+export interface OAuthUsageResponse {
+  five_hour: OAuthUsageBucket | null;
+  seven_day: OAuthUsageBucket | null;
+  seven_day_opus: OAuthUsageBucket | null;
+  seven_day_sonnet: OAuthUsageBucket | null;
+}
+
+export interface CachedOAuthUsage {
+  data: OAuthUsageResponse;
+  fetchedAt: number;
+  error?: string;
+}
+
+export type SettingsTab = 'claude' | 'registration' | 'appearance' | 'system' | 'profile' | 'my-channels' | 'security' | 'groups' | 'memory' | 'skills' | 'mcp-servers' | 'agent-definitions' | 'users' | 'about' | 'bindings' | 'usage' | 'monitor';
 
 export function getErrorMessage(err: unknown, fallback: string): string {
   if (typeof err === 'object' && err !== null && 'message' in err) {

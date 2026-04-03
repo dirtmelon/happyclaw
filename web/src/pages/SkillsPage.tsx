@@ -6,7 +6,7 @@ import { SkeletonCardList } from '@/components/common/Skeletons';
 import { EmptyState } from '@/components/common/EmptyState';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
-import { ToggleSwitch } from '@/components/ui/toggle-switch';
+import { Switch } from '@/components/ui/switch';
 import { Input } from '@/components/ui/input';
 import { useSkillsStore } from '../stores/skills';
 import { useAuthStore } from '../stores/auth';
@@ -137,9 +137,9 @@ export function SkillsPage() {
                   </span>
                 )}
               </div>
-              <ToggleSwitch
+              <Switch
                 checked={syncStatus.autoSyncEnabled}
-                onChange={(enabled) => setAutoSync(enabled)}
+                onCheckedChange={(enabled) => setAutoSync(enabled)}
                 aria-label="自动同步开关"
               />
             </div>

@@ -47,7 +47,7 @@ export default defineConfig(({ command }) => {
             name: 'HappyClaw',
             short_name: 'HappyClaw',
             description: 'Personal Claude Assistant',
-            theme_color: '#f97316',
+            theme_color: '#0d9488',
             background_color: '#FAF9F5',
             display: 'standalone',
             display_override: ['standalone'],
@@ -131,6 +131,17 @@ export default defineConfig(({ command }) => {
                 handler: 'CacheFirst',
                 options: {
                   cacheName: 'gstatic-fonts-cache',
+                  expiration: {
+                    maxEntries: 10,
+                    maxAgeSeconds: 60 * 60 * 24 * 365,
+                  },
+                },
+              },
+              {
+                urlPattern: /\/fonts\/.+\.woff2$/i,
+                handler: 'CacheFirst',
+                options: {
+                  cacheName: 'local-fonts-cache',
                   expiration: {
                     maxEntries: 10,
                     maxAgeSeconds: 60 * 60 * 24 * 365,

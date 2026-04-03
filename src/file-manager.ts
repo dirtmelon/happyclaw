@@ -1,6 +1,7 @@
 import path from 'path';
 import fs from 'fs';
-import { GROUPS_DIR } from './config.js';
+import { DATA_DIR, GROUPS_DIR } from './config.js';
+import { deleteContainerEnvConfig } from './runtime-config.js';
 import { logger } from './logger.js';
 
 // --- Storage usage cache (5 minute TTL) ---
@@ -317,4 +318,14 @@ function calculateDirSize(dirPath: string, depth = 0): number {
     }
   }
   return total;
+}
+
+/** Remove all runtime artifacts for a group folder (workspace, sessions, ipc, env, memory). */
+export function removeFlowArtifacts(folder: string): void {
+  fs.rmSync(path.join(GROUPS_DIR, folder), { recursive: true, force: true });
+  fs.rmSync(path.join(DATA_DIR, 'sessions', folder), { recursive: true, force: true });
+  fs.rmSync(path.join(DATA_DIR, 'ipc', folder), { recursive: true, force: true });
+  fs.rmSync(path.join(DATA_DIR, 'env', folder), { recursive: true, force: true });
+  fs.rmSync(path.join(DATA_DIR, 'memory', folder), { recursive: true, force: true });
+  deleteContainerEnvConfig(folder);
 }

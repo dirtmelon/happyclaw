@@ -11,8 +11,9 @@ import {
 } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
-import { ToggleSwitch } from '@/components/ui/toggle-switch';
+import { Switch } from '@/components/ui/switch';
 import type { ProviderWithHealth, ProviderHealthStatus } from './types';
+import { UsageBars } from './UsageBars';
 
 interface ProviderListProps {
   providers: ProviderWithHealth[];
@@ -63,18 +64,18 @@ function CredentialBadges({ provider }: { provider: ProviderWithHealth }) {
     const expiry = formatOAuthExpiry(provider.claudeOAuthCredentialsExpiresAt);
     badges.push({
       label: 'OAuth',
-      color: expired ? 'bg-red-50 text-red-600 border-red-200' : 'bg-emerald-50 text-emerald-700 border-emerald-200',
+      color: expired ? 'bg-red-50 dark:bg-red-950/40 text-red-600 dark:text-red-400 border-red-200 dark:border-red-800' : 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800',
       detail: expiry ?? undefined,
     });
   }
   if (provider.hasClaudeCodeOauthToken) {
-    badges.push({ label: 'Setup Token', color: 'bg-blue-50 text-blue-700 border-blue-200' });
+    badges.push({ label: 'Setup Token', color: 'bg-blue-50 dark:bg-blue-950/40 text-blue-700 dark:text-blue-300 border-blue-200 dark:border-blue-800' });
   }
   if (provider.hasAnthropicApiKey) {
-    badges.push({ label: 'API Key', color: 'bg-violet-50 text-violet-700 border-violet-200' });
+    badges.push({ label: 'API Key', color: 'bg-violet-50 dark:bg-violet-950/40 text-violet-700 dark:text-violet-300 border-violet-200 dark:border-violet-800' });
   }
   if (provider.hasAnthropicAuthToken) {
-    badges.push({ label: 'Auth Token', color: 'bg-amber-50 text-amber-700 border-amber-200' });
+    badges.push({ label: 'Auth Token', color: 'bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-800' });
   }
 
   if (badges.length === 0) {
@@ -148,8 +149,8 @@ export function ProviderList({
                       <span
                         className={`text-[11px] px-1.5 py-0.5 rounded shrink-0 ${
                           provider.type === 'official'
-                            ? 'bg-blue-100 text-blue-700'
-                            : 'bg-amber-100 text-amber-700'
+                            ? 'bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300'
+                            : 'bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300'
                         }`}
                       >
                         {provider.type === 'official' ? '官方' : '第三方'}
@@ -157,10 +158,10 @@ export function ProviderList({
                     </div>
 
                     <div className="flex items-center gap-1.5 shrink-0">
-                      <ToggleSwitch
+                      <Switch
                         checked={provider.enabled}
                         disabled={disabled || toggling || deleting}
-                        onChange={() => onToggle(provider)}
+                        onCheckedChange={() => onToggle(provider)}
                         aria-label={provider.enabled ? '禁用提供商' : '启用提供商'}
                       />
                       {health && !health.healthy && provider.enabled && (
@@ -257,6 +258,11 @@ export function ProviderList({
                       <Activity className="w-3 h-3 inline mr-0.5" />
                       {health.activeSessionCount} 活跃会话
                     </div>
+                  )}
+
+                  {/* OAuth 用量 */}
+                  {provider.hasClaudeOAuthCredentials && (
+                    <UsageBars providerId={provider.id} />
                   )}
                 </div>
               );
