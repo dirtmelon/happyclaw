@@ -36,15 +36,16 @@ export function signSessionToken(token: string): string {
 // Legacy unsigned tokens are accepted during a 7-day migration window.
 // After the deadline all unsigned sessions expire; users simply re-login
 // to obtain a new HMAC-signed session token.
-const HMAC_MIGRATION_DEADLINE = new Date('2026-04-12T00:00:00Z');
+const HMAC_MIGRATION_DEADLINE_MS = new Date('2026-04-12T00:00:00Z').getTime();
+const HMAC_MIGRATION_DEADLINE_ISO = '2026-04-12T00:00:00.000Z';
 
 /** Verify and extract the raw token from a signed cookie value. Returns null if invalid. */
 export function verifySessionToken(signedValue: string): string | null {
   const dotIndex = signedValue.lastIndexOf('.');
   if (dotIndex === -1) {
     // Legacy unsigned token — accept only within migration window
-    if (Date.now() < HMAC_MIGRATION_DEADLINE.getTime()) {
-      logger.warn('Legacy unsigned session token accepted (migration window). Will expire after %s', HMAC_MIGRATION_DEADLINE.toISOString());
+    if (Date.now() < HMAC_MIGRATION_DEADLINE_MS) {
+      logger.warn('Legacy unsigned session token accepted (migration window). Will expire after %s', HMAC_MIGRATION_DEADLINE_ISO);
       return signedValue;
     }
     // Migration window expired — reject unsigned token
@@ -166,28 +167,20 @@ export function checkLoginRateLimit(
   return { allowed: true };
 }
 
+function incrementAttempt(key: string, now: number): void {
+  const record = loginAttempts.get(key);
+  if (record) {
+    record.count += 1;
+    record.lastAttempt = now;
+  } else {
+    loginAttempts.set(key, { count: 1, firstAttempt: now, lastAttempt: now });
+  }
+}
+
 export function recordLoginAttempt(username: string, ip: string): void {
   const now = Date.now();
-
-  // Record per-username:ip
-  const ipKey = `${username}:${ip}`;
-  const ipRecord = loginAttempts.get(ipKey);
-  if (ipRecord) {
-    ipRecord.count += 1;
-    ipRecord.lastAttempt = now;
-  } else {
-    loginAttempts.set(ipKey, { count: 1, firstAttempt: now, lastAttempt: now });
-  }
-
-  // Record per-username global
-  const userKey = `user:${username}`;
-  const userRecord = loginAttempts.get(userKey);
-  if (userRecord) {
-    userRecord.count += 1;
-    userRecord.lastAttempt = now;
-  } else {
-    loginAttempts.set(userKey, { count: 1, firstAttempt: now, lastAttempt: now });
-  }
+  incrementAttempt(`${username}:${ip}`, now);
+  incrementAttempt(`user:${username}`, now);
 }
 
 export function clearLoginAttempts(username: string, ip: string): void {

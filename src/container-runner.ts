@@ -63,8 +63,10 @@ function getHostClaudeJsonPath(): string {
  */
 function ensureHostClaudeJson(): string {
   const p = getHostClaudeJsonPath();
-  if (!fs.existsSync(p)) {
-    fs.writeFileSync(p, '{}', { mode: 0o600 });
+  try {
+    fs.writeFileSync(p, '{}', { mode: 0o600, flag: 'wx' });
+  } catch (err: any) {
+    if (err.code !== 'EEXIST') throw err;
   }
   return p;
 }

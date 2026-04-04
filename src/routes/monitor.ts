@@ -13,7 +13,7 @@ import {
   canAccessGroup,
   getWebDeps,
 } from '../web-context.js';
-import { getRegisteredGroup, getRouterState, getUserById, hasContainerModeGroups } from '../db.js';
+import { getAllRegisteredGroups, getRegisteredGroup, getRouterState, getUserById, hasContainerModeGroups } from '../db.js';
 import { CONTAINER_IMAGE } from '../config.js';
 import { getSystemSettings, getProviders } from '../runtime-config.js';
 import { setProviderOverride } from '../container-runner.js';
@@ -269,28 +269,30 @@ monitorRoutes.get('/status', authMiddleware, async (c) => {
     }).length;
   }
 
-  // Enrich groups with provider name and owner username
+  // Enrich groups with provider name and owner username (batch lookups)
   const providers = getProviders();
   const providerNameMap = new Map(providers.map((p) => [p.id, p.name]));
-  const userNameCache = new Map<string, string>();
-  const enrichedGroups = filteredGroups.map((g) => {
-    // Sub-agent virtual JIDs (web:main#agent:xxx) aren't in registered_groups,
-    // fall back to the base JID (web:main)
+  const allRegistered = getAllRegisteredGroups();
+
+  // Collect unique creator IDs, then batch-resolve usernames
+  const creatorIds = new Set<string>();
+  for (const g of filteredGroups) {
     const baseJid = g.jid.includes('#agent:') ? g.jid.split('#agent:')[0] : g.jid;
-    const reg = getRegisteredGroup(baseJid);
-    let ownerUsername: string | null = null;
-    if (reg?.created_by) {
-      if (userNameCache.has(reg.created_by)) {
-        ownerUsername = userNameCache.get(reg.created_by)!;
-      } else {
-        const user = getUserById(reg.created_by);
-        ownerUsername = user?.username ?? null;
-        if (ownerUsername) userNameCache.set(reg.created_by, ownerUsername);
-      }
-    }
+    const reg = allRegistered[baseJid];
+    if (reg?.created_by) creatorIds.add(reg.created_by);
+  }
+  const userNameMap = new Map<string, string>();
+  for (const uid of creatorIds) {
+    const user = getUserById(uid);
+    if (user?.username) userNameMap.set(uid, user.username);
+  }
+
+  const enrichedGroups = filteredGroups.map((g) => {
+    const baseJid = g.jid.includes('#agent:') ? g.jid.split('#agent:')[0] : g.jid;
+    const reg = allRegistered[baseJid];
     return {
       ...g,
-      ownerUsername,
+      ownerUsername: reg?.created_by ? userNameMap.get(reg.created_by) ?? null : null,
       selectedProviderName: g.selectedProviderId
         ? providerNameMap.get(g.selectedProviderId) ?? null
         : null,

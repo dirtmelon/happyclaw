@@ -3417,16 +3417,12 @@ async function runAgent(
     const onProcessCb = (proc: ChildProcess, identifier: string, selectedProviderId: string | null) => {
       // 宿主机模式：containerName 传 null，走 process.kill() 路径
       const containerName = executionMode === 'container' ? identifier : null;
-      queue.registerProcess(
-        chatJid,
-        proc,
+      queue.registerProcess(chatJid, proc, {
         containerName,
-        group.folder,
-        identifier,
-        undefined, // agentId
-        undefined, // taskRunId
+        groupFolder: group.folder,
+        displayName: identifier,
         selectedProviderId,
-      );
+      });
     };
 
     const ownerHomeFolder = resolveOwnerHomeFolder(group);
@@ -5440,16 +5436,13 @@ async function processAgentConversation(
     const executionMode = effectiveGroup.executionMode || 'container';
     const onProcessCb = (proc: ChildProcess, identifier: string, selectedProviderId: string | null) => {
       const containerName = executionMode === 'container' ? identifier : null;
-      queue.registerProcess(
-        virtualJid,
-        proc,
+      queue.registerProcess(virtualJid, proc, {
         containerName,
-        effectiveGroup.folder,
-        identifier,
+        groupFolder: effectiveGroup.folder,
+        displayName: identifier,
         agentId,
-        undefined, // taskRunId
         selectedProviderId,
-      );
+      });
     };
 
     const containerInput: ContainerInput = {
@@ -7577,16 +7570,13 @@ async function main(): Promise<void> {
       taskRunId,
       selectedProviderId,
     ) =>
-      queue.registerProcess(
-        groupJid,
-        proc,
+      queue.registerProcess(groupJid, proc, {
         containerName,
         groupFolder,
         displayName,
-        undefined, // agentId
         taskRunId,
         selectedProviderId,
-      ),
+      }),
     sendMessage,
     broadcastStreamEvent,
     onWorkspaceCreated: broadcastGroupCreated,

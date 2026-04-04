@@ -405,21 +405,23 @@ export class GroupQueue {
   registerProcess(
     groupJid: string,
     proc: ChildProcess,
-    containerName: string | null,
-    groupFolder?: string,
-    displayName?: string,
-    agentId?: string,
-    taskRunId?: string,
-    selectedProviderId?: string | null,
+    opts: {
+      containerName: string | null;
+      groupFolder?: string;
+      displayName?: string;
+      agentId?: string;
+      taskRunId?: string;
+      selectedProviderId?: string | null;
+    },
   ): void {
     const state = this.getGroup(groupJid);
     state.process = proc;
-    state.containerName = containerName;
-    state.displayName = displayName || null;
-    if (groupFolder) state.groupFolder = groupFolder;
-    state.agentId = agentId || null;
-    state.taskRunId = taskRunId || null;
-    state.selectedProviderId = selectedProviderId ?? null;
+    state.containerName = opts.containerName;
+    state.displayName = opts.displayName || null;
+    if (opts.groupFolder) state.groupFolder = opts.groupFolder;
+    state.agentId = opts.agentId || null;
+    state.taskRunId = opts.taskRunId || null;
+    state.selectedProviderId = opts.selectedProviderId ?? null;
   }
 
   /**
