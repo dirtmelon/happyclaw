@@ -38,6 +38,7 @@ export function signSessionToken(token: string): string {
 // to obtain a new HMAC-signed session token.
 const HMAC_MIGRATION_DEADLINE_MS = new Date('2026-04-12T00:00:00Z').getTime();
 const HMAC_MIGRATION_DEADLINE_ISO = '2026-04-12T00:00:00.000Z';
+const warnedLegacyTokens = new Set<string>();
 
 /** Verify and extract the raw token from a signed cookie value. Returns null if invalid. */
 export function verifySessionToken(signedValue: string): string | null {
@@ -45,7 +46,10 @@ export function verifySessionToken(signedValue: string): string | null {
   if (dotIndex === -1) {
     // Legacy unsigned token — accept only within migration window
     if (Date.now() < HMAC_MIGRATION_DEADLINE_MS) {
-      logger.warn('Legacy unsigned session token accepted (migration window). Will expire after %s', HMAC_MIGRATION_DEADLINE_ISO);
+      if (!warnedLegacyTokens.has(signedValue)) {
+        warnedLegacyTokens.add(signedValue);
+        logger.warn('Legacy unsigned session token accepted (migration window). Will expire after %s', HMAC_MIGRATION_DEADLINE_ISO);
+      }
       return signedValue;
     }
     // Migration window expired — reject unsigned token
