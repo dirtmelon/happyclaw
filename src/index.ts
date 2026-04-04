@@ -3818,6 +3818,38 @@ export function canSendCrossGroupMessage(
   return false;
 }
 
+/**
+ * Broadcast a message to all connected IM channels of a user that haven't
+ * already received it. Used by scheduled tasks to fan out to all IM channels.
+ */
+function broadcastToOwnerIMChannels(
+  userId: string,
+  sourceFolder: string,
+  alreadySentJids: Set<string>,
+  sendFn: (jid: string) => void,
+  notifyChannels?: string[] | null,
+): void {
+  const sentChannelTypes = new Set<string>();
+  for (const jid of alreadySentJids) {
+    const ct = getChannelType(jid);
+    if (ct) sentChannelTypes.add(ct);
+  }
+  const connectedTypes = imManager.getConnectedChannelTypes(userId);
+  const ownerGroups = getGroupsByOwner(userId);
+  for (const channelType of connectedTypes) {
+    if (sentChannelTypes.has(channelType)) continue;
+    if (notifyChannels && !notifyChannels.includes(channelType)) continue;
+    const target = ownerGroups.find(
+      (g) =>
+        getChannelType(g.jid) === channelType && g.folder === sourceFolder,
+    );
+    if (target) {
+      sendFn(target.jid);
+      sentChannelTypes.add(channelType);
+    }
+  }
+}
+
 function startIpcWatcher(): void {
   if (ipcWatcherRunning) {
     logger.debug('IPC watcher already running, skipping duplicate start');
@@ -3829,39 +3861,6 @@ function startIpcWatcher(): void {
   fs.mkdirSync(ipcBaseDir, { recursive: true });
 
   const fsp = fs.promises;
-
-  /**
-   * Broadcast a message to all connected IM channels of a user that haven't
-   * already received it. Used by scheduled tasks to fan out to all IM channels.
-   */
-  function broadcastToOwnerIMChannels(
-    userId: string,
-    sourceFolder: string,
-    alreadySentJids: Set<string>,
-    sendFn: (jid: string) => void,
-    notifyChannels?: string[] | null,
-  ): void {
-    const sentChannelTypes = new Set<string>();
-    for (const jid of alreadySentJids) {
-      const ct = getChannelType(jid);
-      if (ct) sentChannelTypes.add(ct);
-    }
-    const connectedTypes = imManager.getConnectedChannelTypes(userId);
-    const ownerGroups = getGroupsByOwner(userId);
-    for (const channelType of connectedTypes) {
-      if (sentChannelTypes.has(channelType)) continue;
-      // Filter by notify_channels if specified (null = all channels)
-      if (notifyChannels && !notifyChannels.includes(channelType)) continue;
-      const target = ownerGroups.find(
-        (g) =>
-          getChannelType(g.jid) === channelType && g.folder === sourceFolder,
-      );
-      if (target) {
-        sendFn(target.jid);
-        sentChannelTypes.add(channelType);
-      }
-    }
-  }
 
   const processGroupIpc = async (sourceGroup: string) => {
     if (shuttingDown) return;
@@ -7609,6 +7608,34 @@ async function main(): Promise<void> {
         timestamp: now,
         is_from_me: false,
       });
+    },
+    storeResultAndNotify: async (chatJid, text, options) => {
+      if (!options.skipStore) {
+        await sendMessage(chatJid, text, {
+          sendToIM: false,
+          source: 'scheduled_task',
+          messageMeta: {
+            sourceKind: options.sourceKind || 'sdk_final',
+          },
+        });
+      }
+
+      if (options.ownerId) {
+        const ownerHome = getUserHomeGroup(options.ownerId);
+        if (ownerHome?.folder) {
+          const localImages = extractLocalImImagePaths(
+            text,
+            ownerHome.folder,
+          );
+          broadcastToOwnerIMChannels(
+            options.ownerId,
+            ownerHome.folder,
+            new Set<string>(),
+            (jid) => sendImWithFailTracking(jid, text, localImages),
+            options.notifyChannels,
+          );
+        }
+      }
     },
     assistantName: ASSISTANT_NAME,
     dailySummaryDeps: {

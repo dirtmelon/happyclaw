@@ -45,6 +45,7 @@ import { hasScriptCapacity, runScript } from './script-runner.js';
 import type { StreamEvent } from './stream-event.types.js';
 import { ExecutionMode, RegisteredGroup, ScheduledTask } from './types.js';
 import { checkBillingAccessFresh, isBillingEnabled } from './billing.js';
+import { stripAgentInternalTags } from './utils.js';
 
 /**
  * Resolve the actual group JID to send a task to.
@@ -179,6 +180,17 @@ export interface SchedulerDependencies {
   onWorkspaceCreated?: (jid: string, folder: string, name: string, userId?: string) => void;
   /** Store task prompt as a user-visible message in the workspace chat */
   storePromptMessage?: (chatJid: string, senderId: string, senderName: string, text: string) => void;
+  /** Store task result in workspace chat and push to owner's IM channels */
+  storeResultAndNotify?: (
+    chatJid: string,
+    text: string,
+    options: {
+      ownerId?: string;
+      notifyChannels?: string[] | null;
+      sourceKind?: ContainerOutput['sourceKind'];
+      skipStore?: boolean;
+    },
+  ) => Promise<void>;
   assistantName: string;
   dailySummaryDeps?: DailySummaryDeps;
 }
@@ -489,6 +501,27 @@ async function runTask(
       : 'Completed';
   updateTaskAfterRun(task.id, nextRun, resultSummary);
 
+  if (deps.storeResultAndNotify && (result || error)) {
+    const text = error
+      ? `执行出错: ${error}`
+      : stripAgentInternalTags(result!);
+
+    if (text) {
+      try {
+        await deps.storeResultAndNotify(workspace.jid, text, {
+          ownerId: workspaceGroup.created_by || undefined,
+          notifyChannels: task.notify_channels,
+          sourceKind: 'sdk_final',
+        });
+      } catch (err) {
+        logger.error(
+          { taskId: task.id, err },
+          'Failed to store/notify task result',
+        );
+      }
+    }
+  }
+
   // Auto-cleanup once-task workspace after completion
   if (task.schedule_type === 'once' && !options?.manualRun && task.workspace_jid && task.workspace_folder) {
     setTimeout(() => {
@@ -603,8 +636,28 @@ async function runScriptTask(
       const text = error
         ? `[脚本] 执行失败: ${error}${result ? `\n输出:\n${result.slice(0, 500)}` : ''}`
         : `[脚本] ${result!.slice(0, 1000)}`;
+      const fullText = `${deps.assistantName}: ${text}`;
 
-      await deps.sendMessage(groupJid, `${deps.assistantName}: ${text}`, { source: 'scheduled_task' });
+      await deps.sendMessage(groupJid, fullText, { source: 'scheduled_task' });
+
+      if (deps.storeResultAndNotify) {
+        const groups = deps.registeredGroups();
+        const group = groups[groupJid];
+        if (group?.created_by) {
+          try {
+            await deps.storeResultAndNotify(groupJid, fullText, {
+              ownerId: group.created_by,
+              notifyChannels: task.notify_channels,
+              skipStore: true,
+            });
+          } catch (notifyErr) {
+            logger.error(
+              { taskId: task.id, err: notifyErr },
+              'Failed to notify script task result to IM',
+            );
+          }
+        }
+      }
     }
 
     logger.info(
