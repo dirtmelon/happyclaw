@@ -5,6 +5,7 @@ import { ContainerStatus } from '../components/monitor/ContainerStatus';
 import { QueueStatus } from '../components/monitor/QueueStatus';
 import { SystemInfo } from '../components/monitor/SystemInfo';
 import { GroupStatusCard } from '../components/monitor/GroupStatusCard';
+import { ProviderSwitcher } from '../components/monitor/ProviderSwitcher';
 import { RefreshCw, AlertTriangle, CheckCircle, Hammer, Loader2 } from 'lucide-react';
 import { PageHeader } from '@/components/common/PageHeader';
 import { SkeletonStatCards } from '@/components/common/Skeletons';
@@ -183,6 +184,9 @@ export function MonitorPage() {
                           群组
                         </th>
                         <th className="px-4 py-3 text-left text-xs font-medium text-muted-foreground uppercase">
+                          账号
+                        </th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-muted-foreground uppercase">
                           队列
                         </th>
                         <th className="px-4 py-3 text-left text-xs font-medium text-muted-foreground uppercase">
@@ -191,6 +195,9 @@ export function MonitorPage() {
                         <th className="px-4 py-3 text-left text-xs font-medium text-muted-foreground uppercase">
                           进程标识
                         </th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-muted-foreground uppercase">
+                          Provider
+                        </th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-border">
@@ -198,6 +205,9 @@ export function MonitorPage() {
                         <tr key={group.jid} className="hover:bg-muted/50">
                           <td className="px-4 py-3 text-sm font-medium text-foreground">
                             {group.jid}
+                          </td>
+                          <td className="px-4 py-3 text-sm text-muted-foreground">
+                            {group.ownerUsername || '-'}
                           </td>
                           <td className="px-4 py-3 text-sm text-muted-foreground">
                             {group.pendingTasks} 个任务 / {group.pendingMessages ? '有新消息' : '无新消息'}
@@ -215,6 +225,17 @@ export function MonitorPage() {
                           </td>
                           <td className="px-4 py-3 text-sm text-muted-foreground font-mono text-xs">
                             {group.displayName || group.containerName || '-'}
+                          </td>
+                          <td className="px-4 py-3 text-sm">
+                            {group.active ? (
+                              <ProviderSwitcher
+                                groupFolder={group.groupFolder}
+                                currentProviderId={group.selectedProviderId}
+                                currentProviderName={group.selectedProviderName}
+                              />
+                            ) : (
+                              <span className="text-muted-foreground">-</span>
+                            )}
                           </td>
                         </tr>
                       ))}

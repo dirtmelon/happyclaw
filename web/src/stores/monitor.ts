@@ -21,6 +21,10 @@ export interface SystemStatus {
     pendingTasks: number;
     containerName: string | null;
     displayName: string | null;
+    groupFolder: string | null;
+    ownerUsername: string | null;
+    selectedProviderId: string | null;
+    selectedProviderName: string | null;
   }>;
 }
 
@@ -34,6 +38,7 @@ interface MonitorState {
   loadStatus: () => Promise<void>;
   buildDockerImage: () => Promise<void>;
   clearBuildResult: () => void;
+  switchProvider: (folder: string, providerId: string) => Promise<{ ok: boolean; restarted: boolean }>;
 }
 
 export const useMonitorStore = create<MonitorState>((set) => ({
@@ -88,4 +93,12 @@ export const useMonitorStore = create<MonitorState>((set) => ({
   },
 
   clearBuildResult: () => set({ buildResult: null, buildLogs: [] }),
+
+  switchProvider: async (folder: string, providerId: string) => {
+    const res = await api.post<{ ok: boolean; restarted: boolean }>(
+      `/api/status/groups/${encodeURIComponent(folder)}/switch-provider`,
+      { providerId },
+    );
+    return res;
+  },
 }));

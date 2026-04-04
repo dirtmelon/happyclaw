@@ -1,5 +1,6 @@
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent } from '@/components/ui/card';
+import { ProviderSwitcher } from './ProviderSwitcher';
 
 interface GroupStatusCardProps {
   group: {
@@ -9,6 +10,10 @@ interface GroupStatusCardProps {
     pendingTasks: number;
     containerName: string | null;
     displayName: string | null;
+    groupFolder: string | null;
+    ownerUsername: string | null;
+    selectedProviderId: string | null;
+    selectedProviderName: string | null;
   };
 }
 
@@ -32,6 +37,12 @@ export function GroupStatusCard({ group }: GroupStatusCardProps) {
       </div>
 
       <div className="space-y-1.5 text-xs text-muted-foreground">
+        {group.ownerUsername && (
+          <div className="flex items-center justify-between">
+            <span>账号</span>
+            <span className="text-foreground">{group.ownerUsername}</span>
+          </div>
+        )}
         <div className="flex items-center justify-between">
           <span>队列</span>
           <span className="text-foreground">
@@ -44,6 +55,16 @@ export function GroupStatusCard({ group }: GroupStatusCardProps) {
             {group.displayName || group.containerName || '-'}
           </span>
         </div>
+        {group.active && (
+          <div className="flex items-center justify-between">
+            <span>Provider</span>
+            <ProviderSwitcher
+              groupFolder={group.groupFolder}
+              currentProviderId={group.selectedProviderId}
+              currentProviderName={group.selectedProviderName}
+            />
+          </div>
+        )}
         </div>
       </CardContent>
     </Card>

@@ -196,6 +196,16 @@ interface ResolvedProvider {
 }
 
 /**
+ * One-time provider overrides per group folder.
+ * Set by switchProvider(), consumed (and deleted) by trySelectPoolProvider().
+ */
+const providerOverrides = new Map<string, string>();
+
+export function setProviderOverride(groupFolder: string, providerId: string): void {
+  providerOverrides.set(groupFolder, providerId);
+}
+
+/**
  * Try to select a provider from the pool. Returns profileId + resolved config,
  * or null if pool mode is off (≤1 enabled) / group has provider override / selection fails.
  */
@@ -210,9 +220,42 @@ function trySelectPoolProvider(
   );
   if (hasOverride) return null;
 
+  // Check one-time override (consumed on use)
+  const overrideProviderId = providerOverrides.get(groupFolder);
+  if (overrideProviderId) {
+    providerOverrides.delete(groupFolder);
+    try {
+      const resolved = resolveProviderById(overrideProviderId);
+      providerPool.acquireSession(overrideProviderId);
+      logger.info(
+        { groupFolder, providerId: overrideProviderId },
+        'Using one-time provider override',
+      );
+      return {
+        profileId: overrideProviderId,
+        resolved: { config: resolved.config, customEnv: resolved.customEnv },
+      };
+    } catch (err) {
+      logger.warn({ err, providerId: overrideProviderId }, 'Provider override failed, falling back to pool');
+    }
+  }
+
   // Refresh pool state from V4 config
   const enabledProviders = getEnabledProviders();
-  if (enabledProviders.length <= 1) return null; // No pool needed for 0-1 providers
+  if (enabledProviders.length === 0) return null;
+
+  // Single provider: return its ID for display, but skip pool logic
+  if (enabledProviders.length === 1) {
+    try {
+      const resolved = resolveProviderById(enabledProviders[0].id);
+      return {
+        profileId: enabledProviders[0].id,
+        resolved: { config: resolved.config, customEnv: resolved.customEnv },
+      };
+    } catch {
+      return null;
+    }
+  }
 
   const balancing = getBalancingConfig();
   providerPool.refreshFromConfig(enabledProviders, balancing);
@@ -507,7 +550,7 @@ function buildContainerArgs(
 export async function runContainerAgent(
   group: RegisteredGroup,
   input: ContainerInput,
-  onProcess: (proc: ChildProcess, containerName: string) => void,
+  onProcess: (proc: ChildProcess, containerName: string, selectedProviderId: string | null) => void,
   onOutput?: (output: ContainerOutput) => Promise<void>,
   ownerHomeFolder?: string,
 ): Promise<ContainerOutput> {
@@ -573,7 +616,7 @@ export async function runContainerAgent(
         stdio: ['pipe', 'pipe', 'pipe'],
       });
 
-      onProcess(container, containerName);
+      onProcess(container, containerName, selectedProfileId);
 
       const stdoutState = createStdoutParserState();
       const stderrState = createStderrState();
@@ -816,7 +859,7 @@ export function killProcessTree(
 export async function runHostAgent(
   group: RegisteredGroup,
   input: ContainerInput,
-  onProcess: (proc: ChildProcess, identifier: string) => void,
+  onProcess: (proc: ChildProcess, identifier: string, selectedProviderId: string | null) => void,
   onOutput?: (output: ContainerOutput) => Promise<void>,
   ownerHomeFolder?: string,
 ): Promise<ContainerOutput> {
@@ -1174,7 +1217,7 @@ export async function runHostAgent(
       });
 
       const processId = `host-${group.folder}-${Date.now()}`;
-      onProcess(proc, processId);
+      onProcess(proc, processId, hostSelectedProfileId);
 
       const stdoutState = createStdoutParserState();
       const stderrState = createStderrState();
