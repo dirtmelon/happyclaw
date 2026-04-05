@@ -39,6 +39,7 @@ interface TasksState {
   loading: boolean;
   error: string | null;
   runningTaskIds: Set<string>;
+  groupNames: Record<string, string>;
   loadTasks: () => Promise<void>;
   createTask: (
     prompt: string,
@@ -71,14 +72,16 @@ export const useTasksStore = create<TasksState>((set, get) => ({
   loading: false,
   error: null,
   runningTaskIds: new Set<string>(),
+  groupNames: {},
 
   loadTasks: async () => {
     set({ loading: true });
     try {
-      const data = await api.get<{ tasks: ScheduledTask[]; runningTaskIds?: string[] }>('/api/tasks');
+      const data = await api.get<{ tasks: ScheduledTask[]; runningTaskIds?: string[]; groupNames?: Record<string, string> }>('/api/tasks');
       set({
         tasks: data.tasks,
         runningTaskIds: new Set(data.runningTaskIds || []),
+        groupNames: data.groupNames || {},
         loading: false,
         error: null,
       });
