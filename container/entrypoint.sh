@@ -15,6 +15,7 @@ chown -R node:node /workspace/group /workspace/global /workspace/memory /workspa
 
 # Mark mounted directories as safe for git (CVE-2022-24765 ownership check).
 # Host uid may differ from container node user, causing git to refuse operations.
+# 使用通配符 '*' 因为挂载路径动态（extra mounts、customCwd），无法枚举具体目录。
 git config --global --add safe.directory '*' 2>/dev/null || true
 
 # Source environment variables from mounted env file
