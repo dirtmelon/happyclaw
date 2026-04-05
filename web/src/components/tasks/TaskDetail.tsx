@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Check, Pencil, RefreshCw, X } from 'lucide-react';
 import { ScheduledTask, TaskRunLog, useTasksStore } from '../../stores/tasks';
-import { useGroupsStore } from '../../stores/groups';
 import { showToast } from '../../utils/toast';
 import { INTERVAL_UNITS, formatInterval, decomposeInterval, toggleNotifyChannel } from '../../utils/task-utils';
 import { useConnectedChannels } from '../../hooks/useConnectedChannels';
@@ -55,10 +54,6 @@ export function TaskDetail({ task }: TaskDetailProps) {
   useEffect(() => {
     loadLogs(task.id);
   }, [task.id, loadLogs]);
-
-  useEffect(() => {
-    loadGroups();
-  }, [loadGroups]);
 
   const handleRefreshLogs = async () => {
     setLogsLoading(true);
