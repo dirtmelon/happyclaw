@@ -33,12 +33,13 @@ import {
   getWebDeps,
 } from '../web-context.js';
 import { getRunningTaskIds } from '../task-scheduler.js';
+import { getChannelType, extractChatId } from '../im-channel.js';
 
 const tasksRoutes = new Hono<{ Variables: Variables }>();
 
 // --- Routes ---
 
-tasksRoutes.get('/', authMiddleware, (c) => {
+tasksRoutes.get('/', authMiddleware, async (c) => {
   const authUser = c.get('user') as AuthUser;
   const allGroups = getAllRegisteredGroups();
   const tasks = getAllTasks().filter((task) => {
@@ -64,6 +65,20 @@ tasksRoutes.get('/', authMiddleware, (c) => {
     if (canAccessGroup({ id: authUser.id, role: authUser.role }, { ...group, jid })) {
       groupNames[jid] = group.name || jid;
     }
+  }
+
+  // Enrich Feishu group names with real chat names from API
+  const deps = getWebDeps();
+  if (deps?.getFeishuChatInfo) {
+    const feishuJids = Object.keys(groupNames).filter((jid) => getChannelType(jid) === 'feishu');
+    const enrichPromises = feishuJids.map(async (jid) => {
+      try {
+        const chatId = extractChatId(jid);
+        const info = await deps.getFeishuChatInfo!(authUser.id, chatId);
+        if (info?.name) groupNames[jid] = info.name;
+      } catch { /* ignore enrichment failures */ }
+    });
+    await Promise.allSettled(enrichPromises);
   }
 
   return c.json({ tasks, runningTaskIds: filteredRunningIds, groupNames });
