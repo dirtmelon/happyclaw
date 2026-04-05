@@ -67,16 +67,23 @@ tasksRoutes.get('/', authMiddleware, async (c) => {
     }
   }
 
-  // Enrich Feishu group names with real chat names from API
+  // Enrich Feishu group names with real chat names from API.
+  // Only enrich JIDs actually referenced by visible tasks to avoid N+1 calls
+  // against Feishu Open API when the user has many registered groups.
   const deps = getWebDeps();
   if (deps?.getFeishuChatInfo) {
-    const feishuJids = Object.keys(groupNames).filter((jid) => getChannelType(jid) === 'feishu');
+    const referencedJids = new Set(tasks.map((t) => t.chat_jid));
+    const feishuJids = Object.keys(groupNames).filter(
+      (jid) => referencedJids.has(jid) && getChannelType(jid) === 'feishu',
+    );
     const enrichPromises = feishuJids.map(async (jid) => {
       try {
         const chatId = extractChatId(jid);
         const info = await deps.getFeishuChatInfo!(authUser.id, chatId);
         if (info?.name) groupNames[jid] = info.name;
-      } catch { /* ignore enrichment failures */ }
+      } catch (err) {
+        logger.debug({ jid, err }, 'feishu chat name enrichment failed');
+      }
     });
     await Promise.allSettled(enrichPromises);
   }

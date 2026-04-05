@@ -3994,8 +3994,14 @@ function startIpcWatcher(): void {
                       taskChatJid = taskRecord?.chat_jid;
                     }
                     // If the task targets a specific IM group, send directly to it
+                    // (skip if already sent via data.chatJid or ipcImRoute above)
                     if (taskChatJid && getChannelType(taskChatJid)) {
-                      sendImWithFailTracking(taskChatJid, data.text, taskLocalImages);
+                      if (
+                        taskChatJid !== data.chatJid &&
+                        taskChatJid !== ipcImRoute
+                      ) {
+                        sendImWithFailTracking(taskChatJid, data.text, taskLocalImages);
+                      }
                     } else {
                       // Fallback: broadcast to all connected IM channels
                       const alreadySent = new Set<string>(

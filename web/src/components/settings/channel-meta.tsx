@@ -3,6 +3,7 @@ export const CHANNEL_LABEL: Record<string, string> = {
   telegram: 'Telegram',
   qq: 'QQ',
   wechat: '微信',
+  dingtalk: '钉钉',
 };
 
 export const CHANNEL_COLORS: Record<string, string> = {
@@ -10,6 +11,7 @@ export const CHANNEL_COLORS: Record<string, string> = {
   telegram: 'bg-sky-100 dark:bg-sky-900/40 text-sky-700 dark:text-sky-300',
   qq: 'bg-purple-100 dark:bg-purple-900/40 text-purple-700 dark:text-purple-300',
   wechat: 'bg-green-100 dark:bg-green-900/40 text-green-700 dark:text-green-300',
+  dingtalk: 'bg-cyan-100 dark:bg-cyan-900/40 text-cyan-700 dark:text-cyan-300',
 };
 
 const FeishuIcon = () => (
@@ -37,11 +39,18 @@ const WeChatIcon = () => (
   </svg>
 );
 
+const DingTalkIcon = () => (
+  <svg viewBox="0 0 24 24" className="w-3 h-3" fill="currentColor">
+    <path d="M12.005 0C5.376 0 0 5.376 0 12.005 0 18.633 5.376 24 12.005 24 18.633 24 24 18.633 24 12.005 24 5.376 18.633 0 12.005 0zm6.055 9.224c-.004.076-.053.166-.147.272h.001l-.043.045-.005.005-4.923 5.922h3.56l-2.74 4.56.687-3.917h-2.804l.97-3.97c-.532.123-1.16.315-1.907.572 0 0-1.002.584-2.886-1.143 0 0-1.27-1.116-.524-1.385.32-.116 1.555-.273 2.527-.403 1.314-.178 2.115-.27 2.115-.27s-4.025.068-4.972-.06c-.945-.13-2.15-1.726-2.41-3.17 0 0-.4-.77.854-.403 1.256.367 6.446 1.413 6.446 1.413s-6.72-2.038-7.112-2.38c-.391-.343-.77-2.48-.77-2.777 0-.294.1-.444.432-.326.33.118 4.784 1.872 7.75 3.007 2.967 1.133 5.447 1.95 5.802 2.135.366.18.479.255.585.44.105.184.099.327.087.48l-.003.04v.026c-.015.222-.032.383-.046.553l-.002.021z" />
+  </svg>
+);
+
 export const CHANNEL_ICON: Record<string, React.FC> = {
   feishu: FeishuIcon,
   telegram: TelegramIcon,
   qq: QQIcon,
   wechat: WeChatIcon,
+  dingtalk: DingTalkIcon,
 };
 
 /** Render a channel badge with icon + label */
