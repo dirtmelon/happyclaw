@@ -57,7 +57,16 @@ tasksRoutes.get('/', authMiddleware, (c) => {
   });
   const visibleTaskIds = new Set(tasks.map((t) => t.id));
   const filteredRunningIds = getRunningTaskIds().filter((id) => visibleTaskIds.has(id));
-  return c.json({ tasks, runningTaskIds: filteredRunningIds });
+
+  // Build jid → name mapping for all registered groups (including IM channels)
+  const groupNames: Record<string, string> = {};
+  for (const [jid, group] of Object.entries(allGroups)) {
+    if (canAccessGroup({ id: authUser.id, role: authUser.role }, { ...group, jid })) {
+      groupNames[jid] = group.name || jid;
+    }
+  }
+
+  return c.json({ tasks, runningTaskIds: filteredRunningIds, groupNames });
 });
 
 tasksRoutes.post('/', authMiddleware, async (c) => {

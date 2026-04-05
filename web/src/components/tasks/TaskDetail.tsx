@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Check, Pencil, RefreshCw, X } from 'lucide-react';
 import { ScheduledTask, TaskRunLog, useTasksStore } from '../../stores/tasks';
-import { useGroupsStore } from '../../stores/groups';
 import { showToast } from '../../utils/toast';
 import { INTERVAL_UNITS, formatInterval, decomposeInterval, toggleNotifyChannel } from '../../utils/task-utils';
 import { useConnectedChannels } from '../../hooks/useConnectedChannels';
@@ -47,17 +46,13 @@ export function TaskDetail({ task }: TaskDetailProps) {
   const { updateTask, loadLogs, logs } = useTasksStore();
 
   const connectedChannels = useConnectedChannels();
-  const { groups, loadGroups } = useGroupsStore();
+  const groupNames = useTasksStore((s) => s.groupNames);
   const taskLogs = logs[task.id] || [];
   const [logsLoading, setLogsLoading] = useState(false);
 
   useEffect(() => {
     loadLogs(task.id);
   }, [task.id, loadLogs]);
-
-  useEffect(() => {
-    loadGroups();
-  }, [loadGroups]);
 
   const handleRefreshLogs = async () => {
     setLogsLoading(true);
@@ -451,15 +446,15 @@ export function TaskDetail({ task }: TaskDetailProps) {
               }
               className="w-full text-sm text-foreground bg-card px-2 py-1 rounded border border-border focus:outline-none focus:ring-1 focus:ring-primary"
             >
-              {Object.entries(groups).map(([jid, info]) => (
+              {Object.entries(groupNames).map(([jid, name]) => (
                 <option key={jid} value={jid}>
-                  {info.name} ({jid})
+                  {name} ({jid})
                 </option>
               ))}
             </select>
           ) : (
             <div className="text-sm text-foreground">
-              {groups[task.chat_jid]?.name || task.chat_jid}
+              {groupNames[task.chat_jid] || task.chat_jid}
             </div>
           )}
         </div>
