@@ -217,8 +217,21 @@ tasksRoutes.patch('/:id', authMiddleware, async (c) => {
     return c.json({ error: '只有管理员可以设置宿主机执行模式' }, 403);
   }
 
+  // Validate chat_jid if being changed
+  const patchData = { ...validation.data } as typeof validation.data & { group_folder?: string };
+  if (validation.data.chat_jid !== undefined) {
+    const targetGroup = getRegisteredGroup(validation.data.chat_jid);
+    if (!targetGroup) {
+      return c.json({ error: '目标群组不存在' }, 404);
+    }
+    if (!canAccessGroup({ id: authUser.id, role: authUser.role }, targetGroup)) {
+      return c.json({ error: '无权访问目标群组' }, 403);
+    }
+    // Keep group_folder in sync with chat_jid
+    patchData.group_folder = targetGroup.folder;
+  }
+
   // Auto-recalculate next_run when schedule changes (avoid pulling cron-parser into frontend)
-  const patchData = { ...validation.data };
   if (patchData.schedule_type !== undefined || patchData.schedule_value !== undefined) {
     const schedType = patchData.schedule_type ?? existing.schedule_type;
     const schedValue = patchData.schedule_value ?? existing.schedule_value;

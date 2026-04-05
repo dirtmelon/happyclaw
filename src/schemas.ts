@@ -6,6 +6,7 @@ import type { Permission } from './types.js';
 import { MAX_GROUP_NAME_LEN } from './web-context.js';
 
 export const TaskPatchSchema = z.object({
+  chat_jid: z.string().min(1).optional(),
   prompt: z.string().optional(),
   schedule_type: z.enum(['cron', 'interval', 'once']).optional(),
   schedule_value: z.string().optional(),

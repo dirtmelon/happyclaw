@@ -1894,6 +1894,8 @@ export function updateTask(
       | 'next_run'
       | 'status'
       | 'notify_channels'
+      | 'chat_jid'
+      | 'group_folder'
     >
   >,
 ): void {
@@ -1939,6 +1941,14 @@ export function updateTask(
   if (updates.notify_channels !== undefined) {
     fields.push('notify_channels = ?');
     values.push(updates.notify_channels != null ? JSON.stringify(updates.notify_channels) : null);
+  }
+  if (updates.chat_jid !== undefined) {
+    fields.push('chat_jid = ?');
+    values.push(updates.chat_jid);
+  }
+  if (updates.group_folder !== undefined) {
+    fields.push('group_folder = ?');
+    values.push(updates.group_folder);
   }
 
   if (fields.length === 0) return;
