@@ -450,9 +450,10 @@ export function TaskDetail({ task }: TaskDetailProps) {
               {Object.entries(groupNames).map(([jid, name]) => {
                 const channelType = jid.split(':')[0];
                 const channelLabel = CHANNEL_LABEL[channelType] || (channelType === 'web' ? 'Web' : channelType);
+                const shortId = jid.split(':').slice(1).join(':');
                 return (
                   <option key={jid} value={jid}>
-                    [{channelLabel}] {name}
+                    [{channelLabel}] {name} ({shortId})
                   </option>
                 );
               })}
@@ -460,7 +461,8 @@ export function TaskDetail({ task }: TaskDetailProps) {
           ) : (
             <div className="text-sm text-foreground inline-flex items-center gap-1.5">
               <ChannelBadge channelType={task.chat_jid.split(':')[0]} />
-              {groupNames[task.chat_jid] || task.chat_jid}
+              <span>{groupNames[task.chat_jid] || task.chat_jid}</span>
+              <span className="text-xs text-muted-foreground">({task.chat_jid.split(':').slice(1).join(':')})</span>
             </div>
           )}
         </div>

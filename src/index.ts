@@ -3979,29 +3979,37 @@ function startIpcWatcher(): void {
                     sendImWithFailTracking(ipcImRoute, data.text, localImages);
                   }
 
-                  // Scheduled task: broadcast to all connected IM channels of the owner
+                  // Scheduled task: route to the task's configured chat_jid,
+                  // or broadcast to all connected IM channels of the owner
                   if (data.isScheduledTask && sourceGroupEntry?.created_by) {
-                    const alreadySent = new Set<string>(
-                      [data.chatJid, ipcImRoute].filter(Boolean) as string[],
-                    );
                     const taskLocalImages = extractLocalImImagePaths(
                       data.text,
                       sourceGroup,
                     );
-                    // Resolve notify_channels from the task
                     let taskNotifyChannels: string[] | null | undefined;
+                    let taskChatJid: string | undefined;
                     if (ipcTaskId) {
                       const taskRecord = getTaskById(ipcTaskId);
                       taskNotifyChannels = taskRecord?.notify_channels;
+                      taskChatJid = taskRecord?.chat_jid;
                     }
-                    broadcastToOwnerIMChannels(
-                      sourceGroupEntry.created_by,
-                      ownerHomeFolderForIm,
-                      alreadySent,
-                      (jid) =>
-                        sendImWithFailTracking(jid, data.text, taskLocalImages),
-                      taskNotifyChannels,
-                    );
+                    // If the task targets a specific IM group, send directly to it
+                    if (taskChatJid && getChannelType(taskChatJid)) {
+                      sendImWithFailTracking(taskChatJid, data.text, taskLocalImages);
+                    } else {
+                      // Fallback: broadcast to all connected IM channels
+                      const alreadySent = new Set<string>(
+                        [data.chatJid, ipcImRoute].filter(Boolean) as string[],
+                      );
+                      broadcastToOwnerIMChannels(
+                        sourceGroupEntry.created_by,
+                        ownerHomeFolderForIm,
+                        alreadySent,
+                        (jid) =>
+                          sendImWithFailTracking(jid, data.text, taskLocalImages),
+                        taskNotifyChannels,
+                      );
+                    }
                   }
                 }
                 logger.info(
