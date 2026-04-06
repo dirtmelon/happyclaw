@@ -76,10 +76,10 @@ export function UsagePage() {
     // Aggregate breakdown by date, keeping all token categories
     const byDate = new Map<string, { date: string; total: number; input: number; output: number; cached: number; cost: number; messages: number }>();
     for (const row of breakdown) {
-      const input = row.input_tokens + row.cache_creation_tokens;
       const cached = row.cache_read_tokens;
+      const input = row.input_tokens + row.cache_creation_tokens + cached;
       const output = row.output_tokens;
-      const total = input + cached + output;
+      const total = input + output;
       const existing = byDate.get(row.date);
       if (existing) {
         existing.total += total;
@@ -292,10 +292,10 @@ export function UsagePage() {
                       onChange={(e) => setTokenFilter(e.target.value as typeof tokenFilter)}
                       className="h-8 px-2 rounded-lg border border-border bg-card text-sm text-foreground"
                     >
-                      <option value="total">Total</option>
-                      <option value="input">Input</option>
-                      <option value="output">Output</option>
-                      <option value="cached">Cached</option>
+                      <option value="total">合计</option>
+                      <option value="input">输入</option>
+                      <option value="output">输出</option>
+                      <option value="cached">缓存</option>
                     </select>
                   </div>
                   <div className="h-64 lg:h-80">
@@ -319,7 +319,7 @@ export function UsagePage() {
                             color: 'var(--foreground)',
                           }}
                           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                          formatter={(value: any) => [formatTokens(Number(value) || 0), { total: 'Total', input: 'Input', output: 'Output', cached: 'Cached' }[tokenFilter]]}
+                          formatter={(value: any) => [formatTokens(Number(value) || 0), { total: '合计', input: '输入', output: '输出', cached: '缓存' }[tokenFilter]]}
                           labelFormatter={(label) => `日期: ${label}`}
                         />
                         <Bar dataKey={tokenFilter} fill="var(--color-primary)" radius={[4, 4, 0, 0]} />
