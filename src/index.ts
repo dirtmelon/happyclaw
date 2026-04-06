@@ -614,7 +614,7 @@ function resolveOwnerHomeFolder(group: RegisteredGroup): string {
 /**
  * Write usage records from a usage event to the database.
  * Handles both modelUsage (per-model breakdown) and legacy flat format.
- * When modelUsage is present, root-level cache tokens are assigned to the first model entry.
+ * When modelUsage is present, per-model cache tokens are read directly from each model entry.
  */
 function writeUsageRecords(opts: {
   userId: string;
