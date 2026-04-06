@@ -631,14 +631,13 @@ function writeUsageRecords(opts: {
     numTurns: number;
     modelUsage?: Record<
       string,
-      { inputTokens: number; outputTokens: number; costUSD: number }
+      { inputTokens: number; outputTokens: number; cacheReadInputTokens: number; cacheCreationInputTokens: number; costUSD: number }
     >;
   };
 }): void {
   const { userId, groupFolder, messageId, agentId, usage } = opts;
   if (usage.modelUsage) {
     const models = Object.entries(usage.modelUsage);
-    let cacheReadAssigned = false;
     for (const [model, mu] of models) {
       insertUsageRecord({
         userId,
@@ -648,19 +647,13 @@ function writeUsageRecords(opts: {
         model,
         inputTokens: mu.inputTokens,
         outputTokens: mu.outputTokens,
-        // Assign root-level cache tokens to the first model entry
-        cacheReadInputTokens: cacheReadAssigned
-          ? 0
-          : usage.cacheReadInputTokens,
-        cacheCreationInputTokens: cacheReadAssigned
-          ? 0
-          : usage.cacheCreationInputTokens,
+        cacheReadInputTokens: mu.cacheReadInputTokens || 0,
+        cacheCreationInputTokens: mu.cacheCreationInputTokens || 0,
         costUSD: mu.costUSD,
         durationMs: usage.durationMs,
         numTurns: usage.numTurns,
         source: 'agent',
       });
-      cacheReadAssigned = true;
     }
   } else {
     insertUsageRecord({
