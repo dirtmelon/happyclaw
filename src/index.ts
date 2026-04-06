@@ -560,6 +560,26 @@ function resolveEffectiveGroup(group: RegisteredGroup): {
   // If the group already has an explicit binding, keep it — do NOT overwrite it by searching for is_home
   // This fixes the bug where binding an IM group to a non-home workspace would lose the binding on restart
   if (group.target_agent_id || group.target_main_jid) {
+    // Still inherit runtime properties (executionMode/customCwd/created_by) from home sibling
+    if (!group.is_home) {
+      const siblingJids = getJidsByFolder(group.folder);
+      for (const jid of siblingJids) {
+        const sibling = registeredGroups[jid] ?? getRegisteredGroup(jid);
+        if (sibling && !registeredGroups[jid]) registeredGroups[jid] = sibling;
+        if (sibling?.is_home) {
+          return {
+            effectiveGroup: {
+              ...group,
+              executionMode: sibling.executionMode,
+              customCwd: sibling.customCwd || group.customCwd,
+              created_by: group.created_by || sibling.created_by,
+              is_home: true,
+            },
+            isHome: true,
+          };
+        }
+      }
+    }
     return { effectiveGroup: group, isHome: !!group.is_home };
   }
 
