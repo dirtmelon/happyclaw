@@ -1668,6 +1668,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return;
     }
 
+    // 闭包外标志：set() 内部计算后传出，用于驱动通知逻辑（避免重复判断条件）
+    let didFinalizeAssistant = false;
+
     set((s) => {
       const existing = s.messages[chatJid] || [];
 
@@ -1695,6 +1698,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
           || msg.source_kind === 'legacy');
 
       if (shouldFinalizeAssistant || isSystemError) {
+        if (shouldFinalizeAssistant) didFinalizeAssistant = true;
+
         // Agent 回复或系统错误：立即清除流式状态和等待标志，转移 thinking 缓存
         const streamState = s.streaming[chatJid];
         const thinkingText = isAgentReply
@@ -1728,19 +1733,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       };
     });
 
-    // 对话完成通知：浏览器通知（页面隐藏时）+ 首次引导开启权限
-    const isAgentReplyFinal =
-      msg.is_from_me &&
-      msg.sender !== '__system__' &&
-      source !== 'scheduled_task' &&
-      msg.source_kind !== 'sdk_send_message' &&
-      (msg.source_kind === 'sdk_final'
-        || msg.source_kind === 'interrupt_partial'
-        || msg.source_kind === null
-        || msg.source_kind === undefined
-        || msg.source_kind === 'legacy');
-
-    if (isAgentReplyFinal) {
+    // 对话完成通知：复用 set() 内部的 shouldFinalizeAssistant 判断结果
+    if (didFinalizeAssistant) {
       const groupName = get().groups[chatJid]?.name || '对话';
       const preview = msg.content ? msg.content.slice(0, 80) : '';
       notifyIfHidden(groupName, preview || '收到新回复');

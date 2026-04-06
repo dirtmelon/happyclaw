@@ -22,6 +22,18 @@ const PERIOD_OPTIONS = [
   { label: '90 天', value: 90 },
 ];
 
+const TOKEN_FILTER_LABELS: Record<string, string> = { total: '合计', input: '输入', output: '输出', cached: '缓存' };
+
+/** 计算一行用量数据的总输入 token（含 cache） */
+function calcTotalInput(row: { input_tokens: number; cache_read_tokens: number; cache_creation_tokens: number }): number {
+  return row.input_tokens + row.cache_creation_tokens + row.cache_read_tokens;
+}
+
+/** 计算一行用量数据的全部 token */
+function calcTotalTokens(row: { input_tokens: number; output_tokens: number; cache_read_tokens: number; cache_creation_tokens: number }): number {
+  return calcTotalInput(row) + row.output_tokens;
+}
+
 const CHART_COLORS = [
   'var(--color-primary)',
   '#f59e0b',
@@ -77,9 +89,9 @@ export function UsagePage() {
     const byDate = new Map<string, { date: string; total: number; input: number; output: number; cached: number; cost: number; messages: number }>();
     for (const row of breakdown) {
       const cached = row.cache_read_tokens;
-      const input = row.input_tokens + row.cache_creation_tokens + cached;
+      const input = calcTotalInput(row);
       const output = row.output_tokens;
-      const total = input + output;
+      const total = calcTotalTokens(row);
       const existing = byDate.get(row.date);
       if (existing) {
         existing.total += total;
@@ -125,12 +137,12 @@ export function UsagePage() {
       const existing = byModel.get(row.model);
       if (existing) {
         existing.cost += row.cost_usd;
-        existing.tokens += row.input_tokens + row.cache_read_tokens + row.cache_creation_tokens + row.output_tokens;
+        existing.tokens += calcTotalTokens(row);
       } else {
         byModel.set(row.model, {
           model: row.model,
           cost: row.cost_usd,
-          tokens: row.input_tokens + row.cache_read_tokens + row.cache_creation_tokens + row.output_tokens,
+          tokens: calcTotalTokens(row),
         });
       }
     }
@@ -319,7 +331,7 @@ export function UsagePage() {
                             color: 'var(--foreground)',
                           }}
                           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                          formatter={(value: any) => [formatTokens(Number(value) || 0), { total: '合计', input: '输入', output: '输出', cached: '缓存' }[tokenFilter]]}
+                          formatter={(value: any) => [formatTokens(Number(value) || 0), TOKEN_FILTER_LABELS[tokenFilter]]}
                           labelFormatter={(label) => `日期: ${label}`}
                         />
                         <Bar dataKey={tokenFilter} fill="var(--color-primary)" radius={[4, 4, 0, 0]} />

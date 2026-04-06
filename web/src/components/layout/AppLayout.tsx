@@ -75,13 +75,12 @@ export function AppLayout() {
   }, []);
 
   // 更新 document.title，显示未读回复数
-  const unreadReplies = useChatStore((s) => s.unreadReplies);
+  const totalUnread = useChatStore((s) => Object.values(s.unreadReplies).reduce((sum, n) => sum + n, 0));
   const appearance = useAuthStore((s) => s.appearance);
   useEffect(() => {
     const appName = appearance?.appName || 'HappyClaw';
-    const total = Object.values(unreadReplies).reduce((sum, n) => sum + n, 0);
-    document.title = total > 0 ? `(${total}) ${appName}` : appName;
-  }, [unreadReplies, appearance?.appName]);
+    document.title = totalUnread > 0 ? `(${totalUnread}) ${appName}` : appName;
+  }, [totalUnread, appearance?.appName]);
 
   // 全局监听 agent_status，确保不在 ChatView 页面时也能更新 sub-agent 状态
   useEffect(() => {
