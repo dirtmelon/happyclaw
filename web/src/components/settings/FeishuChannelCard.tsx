@@ -103,6 +103,7 @@ export function FeishuChannelCard() {
           <div>
             <h3 className="text-sm font-semibold text-foreground">飞书 Feishu</h3>
             <p className="text-xs text-muted-foreground mt-0.5">接收飞书群消息并通过 Agent 自动回复</p>
+            <p className="text-xs text-amber-600 dark:text-amber-400">注：仅含机器人的群不会出现在绑定列表中</p>
           </div>
         </div>
         <Switch checked={enabled} disabled={loading || toggling} onCheckedChange={handleToggle} />

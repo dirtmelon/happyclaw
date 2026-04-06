@@ -721,6 +721,57 @@ make help          # 列出所有可用的 make 命令
 - 测试中的纯函数来自 `tests/helpers/im-utils.ts`（Phase 2 提取到 `src/im-utils.ts` 后切换导入源）
 - `ALL_IM_CHANNELS` 数组在 `tests/channel-prefixes.test.ts` 和 `tests/units/jid-routing.test.ts` 中定义，新增渠道时必须同步更新
 
+### 自测与调试
+
+#### admin 密码
+
+已有密码可直接使用。如需重置：
+
+```bash
+npm run reset:admin -- admin <新密码>
+```
+
+#### 服务端 API 验收流程
+
+```bash
+# 1. 登录（Cookie 保存到文件）
+curl -s -X POST http://localhost:3000/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"你的密码"}' \
+  -c /tmp/happyclaw-cookies.txt -w "\nHTTP:%{http_code}"
+
+# 2. 调用需要认证的 API（带上 Cookie）
+curl -s http://localhost:3000/api/groups/web%3Amain/im-groups \
+  -b /tmp/happyclaw-cookies.txt | node -e "
+    const d=require('fs').readFileSync('/dev/stdin','utf8');
+    const r=JSON.parse(d);
+    // 过滤想要的渠道
+    const feishu = (r.imGroups||[]).filter(g=>g.channel_type==='feishu');
+    console.log('Feishu groups:', feishu.length);
+    feishu.forEach(g=>console.log(' -', g.name, '| member_count:', g.member_count));
+  "
+```
+
+**注意**：
+- Session Cookie 保存在文件（如 `/tmp/happyclaw-cookies.txt`），不提交到 git
+- 修改密码后原有 session 立即失效，需重新登录
+- 本地测试不要用生产环境的真实密码
+
+#### 直接查询数据库（临时刻 bug）
+
+```bash
+node -e "
+const Database = require('better-sqlite3');
+const db = new Database('data/db/messages.db', { readonly: true });
+// 示例：查看所有已注册的飞书群组
+const groups = db.prepare(
+  \"SELECT jid, name, folder FROM registered_groups WHERE jid LIKE 'feishu:%'\"
+).all();
+console.log(JSON.stringify(groups, null, 2));
+db.close();
+"
+```
+
 ### 新增 Web 设置项
 
 1. 在对应的 `src/routes/*.ts` 文件中添加鉴权 API

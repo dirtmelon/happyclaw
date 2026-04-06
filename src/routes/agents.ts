@@ -180,7 +180,13 @@ router.patch('/:jid/agents/:agentId', authMiddleware, async (c) => {
 
   // Broadcast update via WebSocket
   const { broadcastAgentStatus } = await import('../web.js');
-  broadcastAgentStatus(jid, agentId, agent.status as import('../types.js').AgentStatus, name, agent.prompt);
+  broadcastAgentStatus(
+    jid,
+    agentId,
+    agent.status as import('../types.js').AgentStatus,
+    name,
+    agent.prompt,
+  );
 
   logger.info({ agentId, jid, name, userId: user.id }, 'Agent renamed');
   return c.json({ success: true });
@@ -402,22 +408,10 @@ router.get('/:jid/im-groups', authMiddleware, async (c) => {
     await Promise.allSettled(chatInfoPromises);
   }
 
-  // Feishu chat_mode: 'group' = group chat, 'p2p' = private chat
-  // If chat_mode is available, use it directly. When API data is completely
-  // missing (permissions not enabled), default to keeping the group rather
-  // than filtering it out. Only filter when chat_mode is explicitly 'p2p'.
-  const imGroups = candidates
-    .filter((g) => {
-      if (g.channel_type === 'feishu') {
-        if (g.chat_mode === 'p2p') return false;
-        // Exclude groups with only the bot (user_count=0 means no real users, just bot)
-        if (g.member_count !== undefined && g.member_count < 1) return false;
-        // chat_mode is 'group' or API data completely missing — keep the group
-        return true;
-      }
-      return true;
-    })
-    .map(({ chat_mode: _, ...rest }) => rest);
+  // Feishu: all registered chats (group and p2p) are now returned.
+  // The member_count filter was removed because p2p chats have user_count=0 or 1
+  // from the Feishu API (counting non-bot users), which is not a meaningful filter.
+  const imGroups = candidates.map(({ chat_mode: _, ...rest }) => rest);
 
   return c.json({ imGroups });
 });
@@ -578,9 +572,11 @@ router.put('/:jid/im-binding', authMiddleware, async (c) => {
   const force = body.force === true;
   // Only update reply_policy if explicitly provided; otherwise preserve existing value
   const replyPolicy =
-    body.reply_policy === 'mirror' ? 'mirror'
-    : body.reply_policy === 'source_only' ? 'source_only'
-    : undefined;
+    body.reply_policy === 'mirror'
+      ? 'mirror'
+      : body.reply_policy === 'source_only'
+        ? 'source_only'
+        : undefined;
   const hasConflict =
     !!imGroup.target_agent_id ||
     (imGroup.target_main_jid &&
@@ -591,11 +587,19 @@ router.put('/:jid/im-binding', authMiddleware, async (c) => {
   }
 
   // Parse activation_mode from request body
-  const validActivationModes = ['always', 'when_mentioned', 'auto', 'disabled'] as const;
+  const validActivationModes = [
+    'always',
+    'when_mentioned',
+    'auto',
+    'disabled',
+  ] as const;
   const rawActivationMode = body.activation_mode;
   const activationMode =
-    typeof rawActivationMode === 'string' && validActivationModes.includes(rawActivationMode as typeof validActivationModes[number])
-      ? (rawActivationMode as typeof validActivationModes[number])
+    typeof rawActivationMode === 'string' &&
+    validActivationModes.includes(
+      rawActivationMode as (typeof validActivationModes)[number],
+    )
+      ? (rawActivationMode as (typeof validActivationModes)[number])
       : undefined;
 
   // Update DB + in-memory cache — clear target_agent_id to avoid conflicts
@@ -604,7 +608,9 @@ router.put('/:jid/im-binding', authMiddleware, async (c) => {
     target_main_jid: targetMainJid,
     target_agent_id: undefined,
     ...(replyPolicy !== undefined ? { reply_policy: replyPolicy } : {}),
-    ...(activationMode !== undefined ? { activation_mode: activationMode } : {}),
+    ...(activationMode !== undefined
+      ? { activation_mode: activationMode }
+      : {}),
   };
   setRegisteredGroup(imJid, updated);
   const deps = getWebDeps();
@@ -651,7 +657,11 @@ router.delete('/:jid/im-binding/:imJid', authMiddleware, async (c) => {
   }
 
   // Update DB + in-memory cache — reset activation_mode to 'auto' on unbind
-  const updated = { ...imGroup, target_main_jid: undefined, activation_mode: 'auto' as const };
+  const updated = {
+    ...imGroup,
+    target_main_jid: undefined,
+    activation_mode: 'auto' as const,
+  };
   setRegisteredGroup(imJid, updated);
   const deps = getWebDeps();
   if (deps) {
