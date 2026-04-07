@@ -102,7 +102,7 @@ export function FeishuChannelCard() {
           <span className={`inline-block w-2 h-2 rounded-full ${config?.connected ? 'bg-success' : 'bg-muted-foreground/40'}`} />
           <div>
             <h3 className="text-sm font-semibold text-foreground">飞书 Feishu</h3>
-            <p className="text-xs text-muted-foreground mt-0.5">接收飞书群消息并通过 Agent 自动回复</p>
+            <p className="text-xs text-muted-foreground mt-0.5">接收飞书消息并通过 Agent 自动回复</p>
             <p className="text-xs text-muted-foreground">私聊和群聊均可绑定到工作区</p>
           </div>
         </div>
