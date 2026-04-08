@@ -997,12 +997,6 @@ async function clearSessionRuntimeFiles(
 }
 
 /**
- * 当前 IM 命令发送者的标识符，由 IM 通道通过 onCommand 第三参数传入。
- * 用于 /owner_mention 命令自动捕获发送者身份。
- */
-let lastCommandSenderImId: string | undefined;
-
-/**
  * Slash command handler for IM channels (Feishu/Telegram).
  * Returns a reply string on success, or null if command not recognized.
  * @param senderImId 发送者的 IM 标识符（如飞书 open_id），由支持的 IM 通道传入
@@ -1012,7 +1006,6 @@ async function handleCommand(
   command: string,
   senderImId?: string,
 ): Promise<string | null> {
-  lastCommandSenderImId = senderImId;
   const parts = command.split(/\s+/);
   const cmd = parts[0].toLowerCase();
   const rawArgs = command.slice(parts[0].length).trim();
@@ -1037,9 +1030,9 @@ async function handleCommand(
     case 'new':
       return handleNewCommand(chatJid, rawArgs);
     case 'require_mention':
-      return handleRequireMentionCommand(chatJid, rawArgs);
+      return handleRequireMentionCommand(chatJid, rawArgs, senderImId);
     case 'owner_mention':
-      return handleOwnerMentionCommand(chatJid);
+      return handleOwnerMentionCommand(chatJid, senderImId);
     case 'sw':
     case 'spawn':
       return handleSpawnCommand(chatJid, rawArgs, chatJid);
@@ -1392,9 +1385,16 @@ async function handleNewCommand(
   return `工作区「${name}」已创建并绑定\n📁 ${folder}\n🔁 回复策略: source_only\n\n发送 /unbind 可解绑回默认工作区`;
 }
 
-function handleRequireMentionCommand(chatJid: string, rawArgs: string): string {
+function handleRequireMentionCommand(chatJid: string, rawArgs: string, senderImId?: string): string {
   const group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
   if (!group) return '未找到当前会话';
+
+  // owner_mentioned 模式下，只有 owner 可以修改激活模式
+  if (group.activation_mode === 'owner_mentioned' && group.owner_im_id) {
+    if (!senderImId || senderImId !== group.owner_im_id) {
+      return '当前为「仅 owner 响应」模式，只有 owner 可以修改此设置';
+    }
+  }
 
   const action = rawArgs.trim().toLowerCase();
   if (action === 'true') {
@@ -1403,7 +1403,13 @@ function handleRequireMentionCommand(chatJid: string, rawArgs: string): string {
     registeredGroups[chatJid] = updated;
     return '已开启：群聊中需要 @机器人 才会响应';
   } else if (action === 'false') {
-    const updated: RegisteredGroup = { ...group, require_mention: false };
+    const updated: RegisteredGroup = {
+      ...group,
+      require_mention: false,
+      // 同时清除 owner_mentioned 模式，恢复为全量响应
+      activation_mode: 'always',
+      owner_im_id: undefined,
+    };
     setRegisteredGroup(chatJid, updated);
     registeredGroups[chatJid] = updated;
     return '已关闭：群聊中所有消息都会响应，无需 @机器人';
@@ -1417,14 +1423,19 @@ function handleRequireMentionCommand(chatJid: string, rawArgs: string): string {
 /**
  * /owner_mention 命令：将当前发送者设为群组 owner（用于 owner_mentioned 模式）。
  * 执行后该群组只响应此发送者的 @mention，其他人的 @mention 被静默忽略。
+ * 如果已有 owner，只有当前 owner 可以重新设置。
  */
-function handleOwnerMentionCommand(chatJid: string): string {
+function handleOwnerMentionCommand(chatJid: string, senderImId?: string): string {
   const group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
   if (!group) return '未找到当前会话';
 
-  const senderImId = lastCommandSenderImId;
   if (!senderImId) {
     return '无法识别发送者身份，请在飞书或钉钉群聊中使用此命令';
+  }
+
+  // 已有 owner 时，只有 owner 本人可以重新设置
+  if (group.activation_mode === 'owner_mentioned' && group.owner_im_id && group.owner_im_id !== senderImId) {
+    return '当前群组已有 owner，只有 owner 本人可以重新设置';
   }
 
   const updated: RegisteredGroup = {
