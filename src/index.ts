@@ -997,13 +997,22 @@ async function clearSessionRuntimeFiles(
 }
 
 /**
+ * 当前 IM 命令发送者的标识符，由 IM 通道通过 onCommand 第三参数传入。
+ * 用于 /owner_mention 命令自动捕获发送者身份。
+ */
+let lastCommandSenderImId: string | undefined;
+
+/**
  * Slash command handler for IM channels (Feishu/Telegram).
  * Returns a reply string on success, or null if command not recognized.
+ * @param senderImId 发送者的 IM 标识符（如飞书 open_id），由支持的 IM 通道传入
  */
 async function handleCommand(
   chatJid: string,
   command: string,
+  senderImId?: string,
 ): Promise<string | null> {
+  lastCommandSenderImId = senderImId;
   const parts = command.split(/\s+/);
   const cmd = parts[0].toLowerCase();
   const rawArgs = command.slice(parts[0].length).trim();
@@ -1029,6 +1038,8 @@ async function handleCommand(
       return handleNewCommand(chatJid, rawArgs);
     case 'require_mention':
       return handleRequireMentionCommand(chatJid, rawArgs);
+    case 'owner_mention':
+      return handleOwnerMentionCommand(chatJid);
     case 'sw':
     case 'spawn':
       return handleSpawnCommand(chatJid, rawArgs, chatJid);
@@ -1401,6 +1412,35 @@ function handleRequireMentionCommand(chatJid: string, rawArgs: string): string {
     return `当前 require_mention: ${current}\n\n用法:\n/require_mention true — 需要 @机器人\n/require_mention false — 全量响应`;
   }
   return '用法: /require_mention true|false';
+}
+
+/**
+ * /owner_mention 命令：将当前发送者设为群组 owner（用于 owner_mentioned 模式）。
+ * 执行后该群组只响应此发送者的 @mention，其他人的 @mention 被静默忽略。
+ */
+function handleOwnerMentionCommand(chatJid: string): string {
+  const group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
+  if (!group) return '未找到当前会话';
+
+  const senderImId = lastCommandSenderImId;
+  if (!senderImId) {
+    return '无法识别发送者身份，请在飞书或钉钉群聊中使用此命令';
+  }
+
+  const updated: RegisteredGroup = {
+    ...group,
+    activation_mode: 'owner_mentioned',
+    owner_im_id: senderImId,
+  };
+  setRegisteredGroup(chatJid, updated);
+  registeredGroups[chatJid] = updated;
+
+  logger.info(
+    { chatJid, senderImId },
+    'Owner mention mode enabled via /owner_mention command',
+  );
+
+  return `已开启「仅我响应」模式\n\n你的 IM 标识: ${senderImId}\n只有你 @机器人 时才会响应，其他人的 @mention 将被静默忽略。\n\n发送 /require_mention false 可恢复为全量响应。`;
 }
 
 const recallCooldowns = new Map<string, number>();
@@ -6519,8 +6559,10 @@ function buildOnAgentMessage(): (baseChatJid: string, agentId: string) => void {
 /**
  * Mention gating callback: when bot is NOT @mentioned in a group chat,
  * return true to process the message anyway, false to drop it.
+ *
+ * @param senderImId - 发送者的 IM 标识符（如飞书 open_id），用于 owner_mentioned 模式
  */
-function shouldProcessGroupMessage(chatJid: string): boolean {
+function shouldProcessGroupMessage(chatJid: string, senderImId?: string): boolean {
   const group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
   if (!group) return false;
 
@@ -6533,6 +6575,8 @@ function shouldProcessGroupMessage(chatJid: string): boolean {
       return true; // 群聊不需要 @bot
     case 'when_mentioned':
       return false; // 必须 @bot
+    case 'owner_mentioned':
+      return false; // 需要 @bot，且后续还需检查 sender 是否为 owner
     case 'disabled':
       return false; // 忽略所有消息（在调用方处理 disabled 的 DM 忽略）
     case 'auto':
@@ -6540,6 +6584,20 @@ function shouldProcessGroupMessage(chatJid: string): boolean {
       // 兼容旧行为：require_mention defaults to false; if true → only process @mentions
       return group.require_mention !== true;
   }
+}
+
+/**
+ * 检查发送者是否为群组 owner（用于 owner_mentioned 模式）。
+ * 当 activation_mode 为 'owner_mentioned' 且 bot 被 @mention 时调用。
+ * owner_im_id 通过 /owner_mention 命令设置，确保身份准确。
+ */
+function isGroupOwnerMessage(chatJid: string, senderImId?: string): boolean {
+  if (!senderImId) return false;
+  const group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
+  if (!group) return false;
+  if (group.activation_mode !== 'owner_mentioned') return true; // 非 owner_mentioned 模式不检查
+  if (!group.owner_im_id) return false; // 未设置 owner，拒绝所有（需要先执行 /owner_mention）
+  return group.owner_im_id === senderImId;
 }
 
 /**
@@ -6614,6 +6672,7 @@ async function connectUserIMChannels(
         onBotAddedToGroup,
         onBotRemovedFromGroup,
         shouldProcessGroupMessage,
+        isGroupOwnerMessage,
         onCardInterrupt: handleCardInterrupt,
       },
     );
@@ -6702,6 +6761,7 @@ async function connectUserIMChannels(
         onBotAddedToGroup,
         onBotRemovedFromGroup,
         shouldProcessGroupMessage,
+        isGroupOwnerMessage,
       },
     );
   }

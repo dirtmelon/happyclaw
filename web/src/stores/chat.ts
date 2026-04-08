@@ -220,7 +220,7 @@ interface ChatState {
   loadAvailableImGroups: (jid: string) => Promise<AvailableImGroup[]>;
   bindImGroup: (jid: string, agentId: string, imJid: string, force?: boolean) => Promise<boolean>;
   unbindImGroup: (jid: string, agentId: string, imJid: string) => Promise<boolean>;
-  bindMainImGroup: (jid: string, imJid: string, force?: boolean, activationMode?: string) => Promise<boolean>;
+  bindMainImGroup: (jid: string, imJid: string, force?: boolean, activationMode?: string, ownerImId?: string) => Promise<boolean>;
   unbindMainImGroup: (jid: string, imJid: string) => Promise<boolean>;
   // Draft persistence across route navigation
   drafts: Record<string, string>;
@@ -2186,7 +2186,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  bindMainImGroup: async (jid, imJid, force, activationMode) => {
+  bindMainImGroup: async (jid, imJid, force, activationMode, ownerImId) => {
     try {
       await api.put(
         `/api/groups/${encodeURIComponent(jid)}/im-binding`,
@@ -2194,6 +2194,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           im_jid: imJid,
           ...(force ? { force: true } : {}),
           ...(activationMode ? { activation_mode: activationMode } : {}),
+          ...(ownerImId ? { owner_im_id: ownerImId } : {}),
         },
       );
       return true;

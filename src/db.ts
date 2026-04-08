@@ -655,6 +655,7 @@ export function initDatabase(): void {
   ensureColumn('registered_groups', 'mcp_mode', "TEXT DEFAULT 'inherit'");
   ensureColumn('registered_groups', 'selected_mcps', 'TEXT');
   ensureColumn('registered_groups', 'activation_mode', "TEXT DEFAULT 'auto'");
+  ensureColumn('registered_groups', 'owner_im_id', 'TEXT');
   ensureColumn('messages', 'token_usage', 'TEXT');
   ensureColumn('messages', 'turn_id', 'TEXT');
   ensureColumn('messages', 'session_id', 'TEXT');
@@ -2218,6 +2219,7 @@ type RegisteredGroupRow = {
   reply_policy: string | null;
   require_mention: number;
   activation_mode: string | null;
+  owner_im_id: string | null;
   mcp_mode: string | null;
   selected_mcps: string | null;
 };
@@ -2245,6 +2247,7 @@ function parseGroupRow(
     reply_policy: row.reply_policy === 'mirror' ? 'mirror' : 'source_only',
     require_mention: row.require_mention === 1,
     activation_mode: parseActivationMode(row.activation_mode),
+    owner_im_id: row.owner_im_id ?? undefined,
   };
 }
 
@@ -2252,14 +2255,15 @@ const VALID_ACTIVATION_MODES = new Set([
   'auto',
   'always',
   'when_mentioned',
+  'owner_mentioned',
   'disabled',
 ]);
 
 function parseActivationMode(
   raw: string | null,
-): 'auto' | 'always' | 'when_mentioned' | 'disabled' {
+): 'auto' | 'always' | 'when_mentioned' | 'owner_mentioned' | 'disabled' {
   if (raw && VALID_ACTIVATION_MODES.has(raw))
-    return raw as 'auto' | 'always' | 'when_mentioned' | 'disabled';
+    return raw as 'auto' | 'always' | 'when_mentioned' | 'owner_mentioned' | 'disabled';
   return 'auto';
 }
 
@@ -2275,8 +2279,8 @@ export function getRegisteredGroup(
 
 export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
   db.prepare(
-    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, execution_mode, custom_cwd, init_source_path, init_git_url, created_by, is_home, selected_skills, target_agent_id, target_main_jid, reply_policy, require_mention, activation_mode, mcp_mode, selected_mcps)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, execution_mode, custom_cwd, init_source_path, init_git_url, created_by, is_home, selected_skills, target_agent_id, target_main_jid, reply_policy, require_mention, activation_mode, owner_im_id, mcp_mode, selected_mcps)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     jid,
     group.name,
@@ -2295,6 +2299,7 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
     group.reply_policy ?? 'source_only',
     group.require_mention === true ? 1 : 0,
     group.activation_mode ?? 'auto',
+    group.owner_im_id ?? null,
     'inherit', // mcp_mode: deprecated, always inherit (user-level MCP applies globally)
     null, // selected_mcps: deprecated, always null
   );

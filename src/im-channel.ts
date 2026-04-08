@@ -64,7 +64,9 @@ export interface IMChannelConnectOpts {
   /** Bot 被移出群聊或群被解散时调用 */
   onBotRemovedFromGroup?: (chatJid: string) => void;
   /** 群聊消息过滤：bot 未被 @mention 时调用，返回 true 则处理，false 则丢弃 */
-  shouldProcessGroupMessage?: (chatJid: string) => boolean;
+  shouldProcessGroupMessage?: (chatJid: string, senderImId?: string) => boolean;
+  /** owner_mentioned 模式下检查发送者是否为 owner */
+  isGroupOwnerMessage?: (chatJid: string, senderImId?: string) => boolean;
   /** 飞书流式卡片按钮中断回调 */
   onCardInterrupt?: (chatJid: string) => void;
 }
@@ -159,6 +161,7 @@ export function createFeishuChannel(config: FeishuConnectionConfig): IMChannel {
         onBotAddedToGroup: opts.onBotAddedToGroup,
         onBotRemovedFromGroup: opts.onBotRemovedFromGroup,
         shouldProcessGroupMessage: opts.shouldProcessGroupMessage,
+        isGroupOwnerMessage: opts.isGroupOwnerMessage,
         onCardInterrupt: opts.onCardInterrupt,
       });
       if (!connected) {
@@ -533,6 +536,7 @@ export function createDingTalkChannel(
           onBotAddedToGroup: opts.onBotAddedToGroup,
           onBotRemovedFromGroup: opts.onBotRemovedFromGroup,
           shouldProcessGroupMessage: opts.shouldProcessGroupMessage,
+          isGroupOwnerMessage: opts.isGroupOwnerMessage,
         });
         return inner.isConnected();
       } catch (err) {

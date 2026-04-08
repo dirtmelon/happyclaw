@@ -16,7 +16,7 @@ export interface GroupInfo {
   custom_cwd?: string;
   created_by?: string;
   pinned_at?: string;
-  activation_mode?: 'auto' | 'always' | 'when_mentioned' | 'disabled';
+  activation_mode?: 'auto' | 'always' | 'when_mentioned' | 'owner_mentioned' | 'disabled';
 }
 
 export interface AgentInfo {
@@ -42,7 +42,8 @@ export interface AvailableImGroup {
   avatar?: string;
   member_count?: number;
   channel_type: string;
-  activation_mode?: 'auto' | 'always' | 'when_mentioned' | 'disabled';
+  activation_mode?: 'auto' | 'always' | 'when_mentioned' | 'owner_mentioned' | 'disabled';
+  owner_im_id?: string | null;
 }
 
 export interface GroupMember {

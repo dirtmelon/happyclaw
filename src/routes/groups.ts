@@ -153,7 +153,7 @@ interface GroupPayloadItem {
   member_role?: 'owner' | 'member';
   member_count?: number;
   pinned_at?: string;
-  activation_mode?: 'auto' | 'always' | 'when_mentioned' | 'disabled';
+  activation_mode?: 'auto' | 'always' | 'when_mentioned' | 'owner_mentioned' | 'disabled';
 }
 
 function buildGroupsPayload(user: AuthUser): Record<string, GroupPayloadItem> {

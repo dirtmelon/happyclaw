@@ -73,7 +73,8 @@ export interface ConnectFeishuOptions {
   onAgentMessage?: (baseChatJid: string, agentId: string) => void;
   onBotAddedToGroup?: (chatJid: string, chatName: string) => void;
   onBotRemovedFromGroup?: (chatJid: string) => void;
-  shouldProcessGroupMessage?: (chatJid: string) => boolean;
+  shouldProcessGroupMessage?: (chatJid: string, senderImId?: string) => boolean;
+  isGroupOwnerMessage?: (chatJid: string, senderImId?: string) => boolean;
   onCardInterrupt?: (chatJid: string) => void;
 }
 
@@ -355,6 +356,7 @@ class IMConnectionManager {
       onBotAddedToGroup: options?.onBotAddedToGroup,
       onBotRemovedFromGroup: options?.onBotRemovedFromGroup,
       shouldProcessGroupMessage: options?.shouldProcessGroupMessage,
+      isGroupOwnerMessage: options?.isGroupOwnerMessage,
       onCardInterrupt: options?.onCardInterrupt,
     });
   }
@@ -533,7 +535,8 @@ class IMConnectionManager {
       onAgentMessage?: (baseChatJid: string, agentId: string) => void;
       onBotAddedToGroup?: (chatJid: string, chatName: string) => void;
       onBotRemovedFromGroup?: (chatJid: string) => void;
-      shouldProcessGroupMessage?: (chatJid: string) => boolean;
+      shouldProcessGroupMessage?: (chatJid: string, senderImId?: string) => boolean;
+      isGroupOwnerMessage?: (chatJid: string, senderImId?: string) => boolean;
     },
   ): Promise<boolean> {
     if (!config.clientId || !config.clientSecret) {
@@ -559,6 +562,7 @@ class IMConnectionManager {
       onBotAddedToGroup: options?.onBotAddedToGroup,
       onBotRemovedFromGroup: options?.onBotRemovedFromGroup,
       shouldProcessGroupMessage: options?.shouldProcessGroupMessage,
+      isGroupOwnerMessage: options?.isGroupOwnerMessage,
     });
   }
 

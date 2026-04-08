@@ -56,7 +56,7 @@ export interface DingTalkConnectOpts {
     chatName: string,
     code: string,
   ) => Promise<boolean>;
-  onCommand?: (chatJid: string, command: string) => Promise<string | null>;
+  onCommand?: (chatJid: string, command: string, senderImId?: string) => Promise<string | null>;
   resolveGroupFolder?: (jid: string) => string | undefined;
   resolveEffectiveChatJid?: (
     chatJid: string,
@@ -64,7 +64,8 @@ export interface DingTalkConnectOpts {
   onAgentMessage?: (baseChatJid: string, agentId: string) => void;
   onBotAddedToGroup?: (chatJid: string, chatName: string) => void;
   onBotRemovedFromGroup?: (chatJid: string) => void;
-  shouldProcessGroupMessage?: (chatJid: string) => boolean;
+  shouldProcessGroupMessage?: (chatJid: string, senderImId?: string) => boolean;
+  isGroupOwnerMessage?: (chatJid: string, senderImId?: string) => boolean;
 }
 
 export interface DingTalkConnection {
@@ -1384,11 +1385,23 @@ export function createDingTalkConnection(
       if (
         isGroup &&
         opts.shouldProcessGroupMessage &&
-        !opts.shouldProcessGroupMessage(jid)
+        !opts.shouldProcessGroupMessage(jid, data.senderId)
       ) {
         logger.debug(
           { jid },
           'DingTalk group message dropped (mention required)',
+        );
+        return;
+      }
+      // owner_mentioned 模式：即使被 @mention，非 owner 的消息也丢弃
+      if (
+        isGroup &&
+        opts.isGroupOwnerMessage &&
+        !opts.isGroupOwnerMessage(jid, data.senderId)
+      ) {
+        logger.debug(
+          { jid, senderId: data.senderId },
+          'DingTalk group message dropped (owner_mentioned mode)',
         );
         return;
       }
@@ -1405,7 +1418,7 @@ export function createDingTalkConnection(
           slashMatch[1] + (slashMatch[2] ? ' ' + slashMatch[2] : '')
         ).trim();
         try {
-          const reply = await opts.onCommand(jid, cmdBody);
+          const reply = await opts.onCommand(jid, cmdBody, data.senderId);
           if (reply) {
             const plainText = markdownToPlainText(reply);
             if (data.sessionWebhook) {

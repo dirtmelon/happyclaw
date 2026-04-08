@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
-import { Loader2, Link2, Unlink, MessageSquare, Users, ArrowRightLeft } from 'lucide-react';
+import { Loader2, Link2, Unlink, MessageSquare, Users, ArrowRightLeft, Info } from 'lucide-react';
 import {
   Dialog,
   DialogContent,
@@ -26,6 +26,7 @@ interface ImBindingDialogProps {
 const ACTIVATION_MODE_OPTIONS = [
   { value: 'always', label: '始终响应' },
   { value: 'when_mentioned', label: '仅 @mention' },
+  { value: 'owner_mentioned', label: '仅我 @mention' },
 ] as const;
 
 export function ImBindingDialog({ open, groupJid, agentId, agent, onClose }: ImBindingDialogProps) {
@@ -293,30 +294,48 @@ export function ImBindingDialog({ open, groupJid, agentId, agent, onClose }: ImB
 
                   {/* Activation mode selector — only for main mode + unbound feishu group chats */}
                   {isMainMode && group.channel_type === 'feishu' && !boundToThis && !boundToOther && (
-                    <select
-                      value={activationModes[group.jid] || 'always'}
-                      onChange={(e) => setActivationModes((prev) => ({ ...prev, [group.jid]: e.target.value }))}
-                      className="flex-shrink-0 text-xs px-1.5 py-1 rounded border border-border bg-background text-foreground"
-                    >
-                      {ACTIVATION_MODE_OPTIONS.map((o) => (
-                        <option key={o.value} value={o.value}>{o.label}</option>
-                      ))}
-                    </select>
+                    <div className="flex-shrink-0 flex flex-col items-end gap-1">
+                      <select
+                        value={activationModes[group.jid] || 'always'}
+                        onChange={(e) => setActivationModes((prev) => ({ ...prev, [group.jid]: e.target.value }))}
+                        className="text-xs px-1.5 py-1 rounded border border-border bg-background text-foreground"
+                      >
+                        {ACTIVATION_MODE_OPTIONS.map((o) => (
+                          <option key={o.value} value={o.value}>{o.label}</option>
+                        ))}
+                      </select>
+                      {(activationModes[group.jid] || 'always') === 'owner_mentioned' && (
+                        <span className="text-[10px] text-amber-600 dark:text-amber-400 flex items-start gap-0.5 max-w-[140px] leading-tight">
+                          <Info className="w-3 h-3 flex-shrink-0 mt-px" />
+                          绑定后需在群里发 /owner_mention 注册身份
+                        </span>
+                      )}
+                    </div>
                   )}
 
                   {/* Action button — three states: unbind / rebind / bind */}
                   {boundToThis ? (
-                    <div className="flex items-center gap-1.5 flex-shrink-0">
+                    <div className="flex flex-col items-end gap-1 flex-shrink-0">
                       {isMainMode && group.channel_type === 'feishu' && (
-                        <select
-                          value={activationModes[group.jid] || group.activation_mode || 'always'}
-                          onChange={(e) => handleActivationModeChange(group.jid, e.target.value)}
-                          className="text-xs px-1.5 py-1 rounded border border-border bg-background text-foreground"
-                        >
-                          {ACTIVATION_MODE_OPTIONS.map((o) => (
-                            <option key={o.value} value={o.value}>{o.label}</option>
-                          ))}
-                        </select>
+                        <div className="flex items-center gap-1.5">
+                          <select
+                            value={activationModes[group.jid] || group.activation_mode || 'always'}
+                            onChange={(e) => handleActivationModeChange(group.jid, e.target.value)}
+                            className="text-xs px-1.5 py-1 rounded border border-border bg-background text-foreground"
+                          >
+                            {ACTIVATION_MODE_OPTIONS.map((o) => (
+                              <option key={o.value} value={o.value}>{o.label}</option>
+                            ))}
+                          </select>
+                        </div>
+                      )}
+                      {isMainMode && group.channel_type === 'feishu' &&
+                        (activationModes[group.jid] || group.activation_mode || 'always') === 'owner_mentioned' &&
+                        !group.owner_im_id && (
+                        <span className="text-[10px] text-amber-600 dark:text-amber-400 flex items-start gap-0.5 max-w-[140px] leading-tight">
+                          <Info className="w-3 h-3 flex-shrink-0 mt-px" />
+                          请在群里发 /owner_mention 注册身份
+                        </span>
                       )}
                       <Button
                         size="sm"

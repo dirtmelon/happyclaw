@@ -43,7 +43,7 @@ export interface ConnectOptions {
   /** 热重连时设置：丢弃 create_time 早于此时间戳（epoch ms）的消息，避免处理渠道关闭期间的堆积消息 */
   ignoreMessagesBefore?: number;
   /** 斜杠指令回调（如 /clear），返回回复文本或 null */
-  onCommand?: (chatJid: string, command: string) => Promise<string | null>;
+  onCommand?: (chatJid: string, command: string, senderImId?: string) => Promise<string | null>;
   /** 根据 chatJid 解析群组 folder，用于下载文件/图片到工作区 */
   resolveGroupFolder?: (chatJid: string) => string | undefined;
   /** 将 IM chatJid 解析为绑定目标 JID（conversation agent 或工作区主对话） */
@@ -57,7 +57,9 @@ export interface ConnectOptions {
   /** Bot 被移出群聊或群被解散时调用（自动解绑 IM 绑定） */
   onBotRemovedFromGroup?: (chatJid: string) => void;
   /** 群聊消息过滤：bot 未被 @mention 时调用，返回 true 则处理，false 则丢弃 */
-  shouldProcessGroupMessage?: (chatJid: string) => boolean;
+  shouldProcessGroupMessage?: (chatJid: string, senderImId?: string) => boolean;
+  /** owner_mentioned 模式下检查发送者是否为 owner */
+  isGroupOwnerMessage?: (chatJid: string, senderImId?: string) => boolean;
   /** 飞书流式卡片按钮中断回调 */
   onCardInterrupt?: (chatJid: string) => void;
 }
@@ -849,6 +851,7 @@ export function createFeishuConnection(
       resolveEffectiveChatJid,
       onAgentMessage,
       shouldProcessGroupMessage,
+      isGroupOwnerMessage,
     } = connectOptions || {};
     const {
       chatId,
@@ -1040,7 +1043,7 @@ export function createFeishuConnection(
         'Feishu slash command detected',
       );
       try {
-        const reply = await onCommand(chatJid, cmdBody);
+        const reply = await onCommand(chatJid, cmdBody, senderOpenId);
         logger.info(
           {
             chatJid,
@@ -1072,15 +1075,23 @@ export function createFeishuConnection(
       }
     }
 
-    // ── 群聊 Mention 过滤：require_mention 模式下，bot 未被 @ 则丢弃 ──
+    // ── 群聊 Mention 过滤：require_mention / owner_mentioned 模式下过滤 ──
     if (chatType === 'group' && shouldProcessGroupMessage) {
       const isBotMentioned = botOpenId
         ? (mentions?.some((m) => m.id?.open_id === botOpenId) ?? false)
         : true; // 无 bot open_id 时默认放行（安全降级）
-      if (!isBotMentioned && !shouldProcessGroupMessage(chatJid)) {
+      if (!isBotMentioned && !shouldProcessGroupMessage(chatJid, senderOpenId)) {
         logger.debug(
           { chatJid, messageId },
           'Dropped group message: mention required but bot not mentioned',
+        );
+        return;
+      }
+      // owner_mentioned 模式：bot 被 @mention 但发送者不是 owner 时丢弃
+      if (isBotMentioned && isGroupOwnerMessage && !isGroupOwnerMessage(chatJid, senderOpenId)) {
+        logger.debug(
+          { chatJid, messageId, senderOpenId },
+          'Dropped group message: owner_mentioned mode, sender is not owner',
         );
         return;
       }
