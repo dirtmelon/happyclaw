@@ -84,6 +84,13 @@ export interface QQConnection {
     text: string,
     localImagePaths?: string[],
   ): Promise<void>;
+  sendImage(
+    chatId: string,
+    imageBuffer: Buffer,
+    mimeType: string,
+    caption?: string,
+    fileName?: string,
+  ): Promise<void>;
   sendChatAction(chatId: string, action: 'typing'): Promise<void>;
   isConnected(): boolean;
 }
@@ -340,6 +347,53 @@ export function createQQConnection(config: QQConnectionConfig): QQConnection {
     await apiRequest('POST', endpoint, {
       content,
       msg_type: 0, // text
+      msg_seq: msgSeq,
+    });
+  }
+
+  // ─── Image Sending ───────────────────────────────────────
+
+  async function uploadMedia(
+    chatType: 'c2c' | 'group',
+    openid: string,
+    imageBuffer: Buffer,
+  ): Promise<string> {
+    const endpoint =
+      chatType === 'c2c'
+        ? `/v2/users/${openid}/files`
+        : `/v2/groups/${openid}/files`;
+
+    const res = await apiRequest<{ file_info: string }>(
+      'POST',
+      endpoint,
+      {
+        file_type: 1, // 1 = image
+        file_data: imageBuffer.toString('base64'),
+        srv_send_msg: false,
+      },
+    );
+    return res.file_info;
+  }
+
+  async function sendQQImageMessage(
+    chatType: 'c2c' | 'group',
+    openid: string,
+    imageBuffer: Buffer,
+    caption?: string,
+  ): Promise<void> {
+    const fileInfo = await uploadMedia(chatType, openid, imageBuffer);
+    const chatKey = `${chatType}:${openid}`;
+    const msgSeq = getNextMsgSeq(chatKey);
+
+    const endpoint =
+      chatType === 'c2c'
+        ? `/v2/users/${openid}/messages`
+        : `/v2/groups/${openid}/messages`;
+
+    await apiRequest('POST', endpoint, {
+      msg_type: 7, // rich media
+      media: { file_info: fileInfo },
+      content: caption || '',
       msg_seq: msgSeq,
     });
   }
@@ -1044,6 +1098,33 @@ export function createQQConnection(config: QQConnectionConfig): QQConnection {
         logger.info({ chatId }, 'QQ message sent');
       } catch (err) {
         logger.error({ err, chatId }, 'Failed to send QQ message');
+        throw err;
+      }
+    },
+
+    async sendImage(
+      chatId: string,
+      imageBuffer: Buffer,
+      _mimeType: string,
+      caption?: string,
+      _fileName?: string,
+    ): Promise<void> {
+      const parsed = parseQQChatId(chatId);
+      if (!parsed) {
+        logger.error({ chatId }, 'Invalid QQ chat ID format for image');
+        return;
+      }
+
+      try {
+        await sendQQImageMessage(
+          parsed.type,
+          parsed.openid,
+          imageBuffer,
+          caption,
+        );
+        logger.info({ chatId }, 'QQ image sent');
+      } catch (err) {
+        logger.error({ err, chatId }, 'Failed to send QQ image');
         throw err;
       }
     },
