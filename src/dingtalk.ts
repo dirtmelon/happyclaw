@@ -383,12 +383,19 @@ export function createDingTalkConnection(
   /**
    * Attach "🤔思考中" emoji reaction to user's message as ack confirmation.
    * Retries up to 3 times with backoff for transient failures.
+   * @param chatId raw JID (e.g. "dingtalk:c2c:xxx") — will be stripped to
+   *   bare chatId for storage, matching the key used by recallAckReaction.
    */
   async function attachAckReaction(
     msgId: string,
     conversationId: string,
-    chatId: string,
+    rawJid: string,
   ): Promise<void> {
+    // Strip the "dingtalk:" prefix so the Map key matches what
+    // recallAckReaction receives (which comes through extractChatId).
+    const chatId = rawJid.startsWith('dingtalk:')
+      ? rawJid.slice('dingtalk:'.length)
+      : rawJid;
     const body = {
       robotCode: config.clientId,
       openMsgId: msgId,
@@ -413,9 +420,11 @@ export function createDingTalkConnection(
         logger.debug({ msgId, chatId }, 'DingTalk ack reaction attached');
         return;
       } catch (err: any) {
-        const isRetryable =
-          !err?.response ||
-          (err.response?.status >= 500 && err.response?.status < 600);
+        // apiRequest throws plain Error objects (no .response property),
+        // so parse the status code from the error message string.
+        const match = err?.message?.match(/\((\d{3})\)/);
+        const status = match ? parseInt(match[1], 10) : 0;
+        const isRetryable = status === 0 || (status >= 500 && status < 600);
         if (!isRetryable || i === ACK_REACTION_ATTACH_DELAYS.length - 1) {
           logger.debug(
             { err: err.message, msgId, chatId },

@@ -788,6 +788,10 @@ export class DingTalkStreamingCardController {
       clearTimeout(this.flushTimer);
       this.flushTimer = null;
     }
+    if (this.auxFlushTimer) {
+      clearTimeout(this.auxFlushTimer);
+      this.auxFlushTimer = null;
+    }
   }
 
   private async pushStreamingContent(
