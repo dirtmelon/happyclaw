@@ -541,7 +541,7 @@ class IMConnectionManager {
   async connectUserDingTalk(
     userId: string,
     config: DingTalkConnectConfig,
-    onNewChat: (chatJid: string, chatName: string) => void,
+    onNewChat: (chatJid: string, chatName: string) => boolean,
     options?: {
       ignoreMessagesBefore?: number;
       onCommand?: (chatJid: string, command: string) => Promise<string | null>;

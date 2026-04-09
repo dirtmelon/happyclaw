@@ -303,9 +303,9 @@ export function SystemSettingsSection() {
               关闭后，来自未注册飞书/Telegram/QQ 群组的消息将被静默忽略，不会自动创建工作区
             </p>
           </div>
-          <ToggleSwitch
+          <Switch
             checked={autoRegisterIMChats}
-            onChange={setAutoRegisterIMChats}
+            onCheckedChange={setAutoRegisterIMChats}
             aria-label="自动注册新 IM 群组"
           />
         </div>
