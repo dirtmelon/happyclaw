@@ -1398,6 +1398,18 @@ function handleRequireMentionCommand(chatJid: string, rawArgs: string, senderImI
 
   const action = rawArgs.trim().toLowerCase();
   if (action === 'true') {
+    // 如果当前是 owner_mentioned 模式，切换为 when_mentioned 并清除 owner
+    if (group.activation_mode === 'owner_mentioned') {
+      const updated: RegisteredGroup = {
+        ...group,
+        require_mention: true,
+        activation_mode: 'when_mentioned',
+        owner_im_id: undefined,
+      };
+      setRegisteredGroup(chatJid, updated);
+      registeredGroups[chatJid] = updated;
+      return '已从「仅 owner 响应」切换为「需要 @机器人」模式，所有人 @机器人 均可触发';
+    }
     const updated: RegisteredGroup = { ...group, require_mention: true };
     setRegisteredGroup(chatJid, updated);
     registeredGroups[chatJid] = updated;
@@ -7111,6 +7123,7 @@ async function main(): Promise<void> {
           onBotAddedToGroup: buildOnNewChat(adminUser.id, homeFolder),
           onBotRemovedFromGroup: buildOnBotRemovedFromGroup(),
           shouldProcessGroupMessage,
+          isGroupOwnerMessage,
           onCardInterrupt: handleCardInterrupt,
         },
       );
@@ -7215,6 +7228,7 @@ async function main(): Promise<void> {
             onBotAddedToGroup: buildOnNewChat(userId, homeFolder),
             onBotRemovedFromGroup: buildOnBotRemovedFromGroup(),
             shouldProcessGroupMessage,
+            isGroupOwnerMessage,
             onCardInterrupt: handleCardInterrupt,
           },
         );
@@ -7310,6 +7324,7 @@ async function main(): Promise<void> {
             onBotAddedToGroup: buildOnNewChat(userId, homeFolder),
             onBotRemovedFromGroup: buildOnBotRemovedFromGroup(),
             shouldProcessGroupMessage,
+            isGroupOwnerMessage,
           },
         );
         logger.info(

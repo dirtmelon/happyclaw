@@ -1382,10 +1382,16 @@ export function createDingTalkConnection(
       }
 
       // ── Group mention check ──
+      // 钉钉 Stream 只收到 @bot 消息，所以 shouldProcessGroupMessage（"bot 未被
+      // @mention 时是否放行"）语义上对钉钉不完全适用。但 owner_mentioned 模式下
+      // 它返回 false，会在 Gate 1 误丢所有群消息，导致 isGroupOwnerMessage 永远
+      // 不会执行。修复：当 shouldProcessGroupMessage 返回 false 且
+      // isGroupOwnerMessage 回调存在时，不立即丢弃，让 Gate 2 做 sender 过滤。
       if (
         isGroup &&
         opts.shouldProcessGroupMessage &&
-        !opts.shouldProcessGroupMessage(jid, data.senderId)
+        !opts.shouldProcessGroupMessage(jid, data.senderId) &&
+        !opts.isGroupOwnerMessage
       ) {
         logger.debug(
           { jid },
