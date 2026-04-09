@@ -332,9 +332,7 @@ export class DingTalkStreamingCardController {
   append(text: string): void {
     if (!this.isActive()) return;
     this.accumulatedText = text; // Full replacement (same as Feishu pattern)
-    // Keep thinkingText for DingTalk — unlike Feishu which has separate
-    // auxiliary regions, DingTalk only has msgContent, so reasoning must
-    // be preserved and prepended for the user to see it.
+    this.thinkingText = ''; // Clear reasoning once real text arrives (align with Feishu)
     this.thinking = false; // No longer in active thinking phase
     this.scheduleFlush();
   }
@@ -387,9 +385,10 @@ export class DingTalkStreamingCardController {
     }
 
     try {
-      // 1. Final streaming frame — include auxiliary prefix in final content
-      const finalContent =
-        this.buildAuxPrefix() + ensureTableBlankLines(finalText);
+      // 1. Final streaming frame — clear reasoning, only keep reply body
+      this.thinkingText = '';
+      this.thinking = false;
+      const finalContent = ensureTableBlankLines(finalText);
       await this.pushStreamingContent(finalContent, true);
       // 2. Switch to FINISHED
       await this.updateFlowStatus(FlowStatus.FINISHED, finalContent);

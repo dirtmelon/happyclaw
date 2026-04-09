@@ -85,6 +85,8 @@ export interface DingTalkConnection {
   ): Promise<void>;
   sendFile(chatId: string, filePath: string, fileName: string): Promise<void>;
   sendReaction(chatId: string, isTyping: boolean): Promise<void>;
+  /** Clear the ack reaction for a chat (e.g. when streaming card handled the reply) */
+  clearAckReaction(chatId: string): void;
   isConnected(): boolean;
   getLastMessageId?(chatId: string): string | undefined;
   createStreamingSession?(
@@ -233,6 +235,12 @@ export function createDingTalkConnection(
   // Sender staff ID per chat (enterprise staff ID for batchSend API)
   const lastSenderStaffIds = new Map<string, string>();
 
+  // Ack reaction per chat (emoji reaction on user's message to confirm receipt)
+  const ackReactionByChat = new Map<
+    string,
+    { msgId: string; conversationId: string }
+  >();
+
   function isDuplicate(msgId: string): boolean {
     const now = Date.now();
     // Map preserves insertion order; stop at first non-expired entry
@@ -366,6 +374,80 @@ export function createDingTalkConnection(
       if (bodyStr) req.write(bodyStr);
       req.end();
     });
+  }
+
+  // ─── Ack Reaction (Emoji on user's message) ───────────────
+
+  const ACK_REACTION_ATTACH_DELAYS = [0, 400, 1200];
+
+  /**
+   * Attach "🤔思考中" emoji reaction to user's message as ack confirmation.
+   * Retries up to 3 times with backoff for transient failures.
+   */
+  async function attachAckReaction(
+    msgId: string,
+    conversationId: string,
+    chatId: string,
+  ): Promise<void> {
+    const body = {
+      robotCode: config.clientId,
+      openMsgId: msgId,
+      openConversationId: conversationId,
+      emotionType: 2,
+      emotionName: '🤔思考中',
+      textEmotion: {
+        emotionId: '2659900',
+        emotionName: '🤔思考中',
+        text: '🤔思考中',
+        backgroundId: 'im_bg_1',
+      },
+    };
+
+    for (let i = 0; i < ACK_REACTION_ATTACH_DELAYS.length; i++) {
+      if (ACK_REACTION_ATTACH_DELAYS[i] > 0) {
+        await new Promise((r) => setTimeout(r, ACK_REACTION_ATTACH_DELAYS[i]));
+      }
+      try {
+        await apiRequest('POST', '/v1.0/robot/emotion/reply', body);
+        ackReactionByChat.set(chatId, { msgId, conversationId });
+        logger.debug({ msgId, chatId }, 'DingTalk ack reaction attached');
+        return;
+      } catch (err: any) {
+        const isRetryable =
+          !err?.response ||
+          (err.response?.status >= 500 && err.response?.status < 600);
+        if (!isRetryable || i === ACK_REACTION_ATTACH_DELAYS.length - 1) {
+          logger.debug(
+            { err: err.message, msgId, chatId },
+            'DingTalk ack reaction attach failed',
+          );
+          return;
+        }
+      }
+    }
+  }
+
+  /**
+   * Recall the ack reaction emoji from user's message.
+   * Silent on failure — the emoji will naturally expire.
+   */
+  async function recallAckReaction(chatId: string): Promise<void> {
+    const stored = ackReactionByChat.get(chatId);
+    if (!stored) return;
+    ackReactionByChat.delete(chatId);
+    try {
+      await apiRequest('POST', '/v1.0/robot/emotion/recall', {
+        robotCode: config.clientId,
+        openMsgId: stored.msgId,
+        openConversationId: stored.conversationId,
+      });
+      logger.debug({ chatId }, 'DingTalk ack reaction recalled');
+    } catch (err: any) {
+      logger.debug(
+        { err: err.message, chatId },
+        'DingTalk ack reaction recall failed (non-critical)',
+      );
+    }
   }
 
   // ─── Message Sending ──────────────────────────────────────
@@ -1496,6 +1578,10 @@ export function createDingTalkConnection(
         },
         agentRouting?.agentId ?? undefined,
       );
+
+      // ── Ack Reaction：确认已收到消息 ──
+      attachAckReaction(msgId, conversationId, jid).catch(() => {});
+
       notifyNewImMessage();
 
       if (agentRouting?.agentId) {
@@ -1924,6 +2010,10 @@ export function createDingTalkConnection(
 
     async sendReaction(_chatId: string, _isTyping: boolean): Promise<void> {
       // DingTalk doesn't support typing indicators via Stream
+    },
+
+    clearAckReaction(chatId: string): void {
+      recallAckReaction(chatId).catch(() => {});
     },
 
     isConnected(): boolean {
