@@ -353,11 +353,19 @@ export function createQQConnection(config: QQConnectionConfig): QQConnection {
 
   // ─── Image Sending ───────────────────────────────────────
 
+  const QQ_UPLOAD_MAX_SIZE = 10 * 1024 * 1024; // 10MB
+
   async function uploadMedia(
     chatType: 'c2c' | 'group',
     openid: string,
     imageBuffer: Buffer,
   ): Promise<string> {
+    if (imageBuffer.length > QQ_UPLOAD_MAX_SIZE) {
+      throw new Error(
+        `Image too large for QQ upload: ${(imageBuffer.length / 1024 / 1024).toFixed(1)}MB (max 10MB)`,
+      );
+    }
+
     const endpoint =
       chatType === 'c2c'
         ? `/v2/users/${openid}/files`
@@ -372,6 +380,9 @@ export function createQQConnection(config: QQConnectionConfig): QQConnection {
         srv_send_msg: false,
       },
     );
+    if (!res.file_info) {
+      throw new Error('QQ uploadMedia: no file_info in response');
+    }
     return res.file_info;
   }
 
