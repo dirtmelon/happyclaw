@@ -169,7 +169,11 @@ function extractTextContent(items: MessageItem[]): string {
         parts.push('(voice)');
       }
     } else if (item.type === MESSAGE_ITEM_TYPE_FILE) {
-      parts.push(`(file: ${item.file_item?.file_name ?? 'unknown'})`);
+      // Only add placeholder if no CDN media to download
+      // (processFileItem will generate a [文件: ...] prefix for downloadable files)
+      if (!item.file_item?.media?.encrypt_query_param) {
+        parts.push(`(file: ${item.file_item?.file_name ?? 'unknown'})`);
+      }
     } else if (item.type === 5 /* VIDEO */) {
       parts.push('(video)');
     }
@@ -595,6 +599,7 @@ export function createWeChatConnection(
         }[] = [];
         const textPrefixes: string[] = [];
 
+        // Note: textPrefixes order depends on CDN response time, not message item order
         // Download images and files in parallel (independent CDN requests)
         const msgId =
           msg.message_id !== undefined
