@@ -2886,7 +2886,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
                   streamingCardHandledIM = true;
                   // Streaming card replaced the normal sendMessage path,
                   // so clear the ack reaction that would normally be cleared in sendMessage.
-                  imManager.clearAckReaction(chatJid);
+                  imManager.clearAckReaction(replySourceImJid || chatJid);
                   logger.debug(
                     { chatJid },
                     'Streaming card completed with final text',
@@ -3029,7 +3029,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     await setTyping(chatJid, false);
     // Always clear ack reaction in finally — covers error/interrupt/abort paths
     // where the normal sendMessage (which clears it) is never called.
-    imManager.clearAckReaction(chatJid);
+    // Use replySourceImJid when available (IM messages routed through home group
+    // have chatJid=web:xxx but replySourceImJid=dingtalk:xxx).
+    const ackJid = replySourceImJid || chatJid;
+    imManager.clearAckReaction(ackJid);
     if (idleTimer) clearTimeout(idleTimer);
     activeRouteUpdaters.delete(effectiveGroup.folder);
     activeImReplyRoutes.delete(effectiveGroup.folder);
