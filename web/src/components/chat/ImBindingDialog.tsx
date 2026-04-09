@@ -196,6 +196,15 @@ export function ImBindingDialog({ open, groupJid, agentId, agent, onClose }: ImB
     ? '绑定 IM 渠道 — 主对话'
     : `绑定 IM 渠道${agent ? ` — ${agent.name}` : ''}`;
 
+  const renderThreadCapability = (group: AvailableImGroup) => {
+    if (!group.is_thread_capable) return null;
+    return (
+      <span className="inline-flex items-center rounded-full border border-sky-200 bg-sky-50 px-2 py-0.5 text-[10px] font-medium text-sky-700 dark:border-sky-800 dark:bg-sky-950/30 dark:text-sky-300">
+        话题群
+      </span>
+    );
+  };
+
   return (<>
     <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
       <DialogContent className="sm:max-w-md">
@@ -205,6 +214,12 @@ export function ImBindingDialog({ open, groupJid, agentId, agent, onClose }: ImB
             {title}
           </DialogTitle>
         </DialogHeader>
+
+        {isMainMode && (
+          <div className="rounded-lg border border-border/70 bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+            绑定飞书话题群后，工作区会切换为竖向话题列表，每个飞书话题都会自动映射成一个独立会话。
+          </div>
+        )}
 
         {/* Filter input — only show when there are groups */}
         {!loading && imGroups.length > 0 && (
@@ -243,6 +258,7 @@ export function ImBindingDialog({ open, groupJid, agentId, agent, onClose }: ImB
               const boundToThis = isBoundToThis(group);
               const boundToOther = isBoundToOther(group);
               const isActioning = actionLoading === group.jid;
+              const cannotBindToAgent = !isMainMode && !!group.is_thread_capable;
 
               return (
                 <div
@@ -270,7 +286,10 @@ export function ImBindingDialog({ open, groupJid, agentId, agent, onClose }: ImB
 
                   {/* Group info */}
                   <div className="flex-1 min-w-0">
-                    <div className="text-sm font-medium truncate">{group.name}</div>
+                    <div className="flex items-center gap-2">
+                      <div className="text-sm font-medium truncate">{group.name}</div>
+                      {renderThreadCapability(group)}
+                    </div>
                     <div className="flex items-center gap-2 text-xs text-muted-foreground">
                       <ChannelBadge channelType={group.channel_type} />
                       {group.member_count != null && (
@@ -290,6 +309,11 @@ export function ImBindingDialog({ open, groupJid, agentId, agent, onClose }: ImB
                         </span>
                       )}
                     </div>
+                    {cannotBindToAgent && (
+                      <div className="mt-1 text-[11px] text-muted-foreground">
+                        该群会按飞书话题自动映射，只能绑定到工作区主对话。
+                      </div>
+                    )}
                   </div>
 
                   {/* Activation mode selector — only for main mode + unbound feishu group chats */}
@@ -365,6 +389,15 @@ export function ImBindingDialog({ open, groupJid, agentId, agent, onClose }: ImB
                         <ArrowRightLeft className="w-3 h-3 mr-1" />
                       )}
                       换绑
+                    </Button>
+                  ) : cannotBindToAgent ? (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled
+                      className="flex-shrink-0"
+                    >
+                      仅工作区绑定
                     </Button>
                   ) : (
                     <Button

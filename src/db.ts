@@ -28,6 +28,7 @@ import {
   NewMessage,
   MessageCursor,
   MessageSourceKind,
+  ImContextBinding,
   RedeemCode,
   RegisteredGroup,
   ScheduledTask,
@@ -305,6 +306,21 @@ export function initDatabase(): void {
       created_by TEXT,
       is_home INTEGER DEFAULT 0
     );
+    CREATE TABLE IF NOT EXISTS im_context_bindings (
+      source_jid TEXT NOT NULL,
+      context_type TEXT NOT NULL,
+      context_id TEXT NOT NULL,
+      workspace_jid TEXT NOT NULL,
+      agent_id TEXT NOT NULL,
+      root_message_id TEXT,
+      title TEXT,
+      last_active_at TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (source_jid, context_type, context_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_icb_workspace ON im_context_bindings(workspace_jid);
+    CREATE INDEX IF NOT EXISTS idx_icb_agent ON im_context_bindings(agent_id);
   `);
 
   // Auth tables
@@ -411,7 +427,12 @@ export function initDatabase(): void {
       completed_at TEXT,
       result_summary TEXT,
       last_im_jid TEXT,
-      spawned_from_jid TEXT
+      spawned_from_jid TEXT,
+      source_kind TEXT,
+      thread_id TEXT,
+      root_message_id TEXT,
+      title_source TEXT,
+      last_active_at TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_agents_group ON agents(group_folder);
     CREATE INDEX IF NOT EXISTS idx_agents_jid ON agents(chat_jid);
@@ -656,12 +677,34 @@ export function initDatabase(): void {
   ensureColumn('registered_groups', 'selected_mcps', 'TEXT');
   ensureColumn('registered_groups', 'activation_mode', "TEXT DEFAULT 'auto'");
   ensureColumn('registered_groups', 'owner_im_id', 'TEXT');
+  ensureColumn(
+    'registered_groups',
+    'conversation_source',
+    "TEXT DEFAULT 'manual'",
+  );
+  ensureColumn(
+    'registered_groups',
+    'conversation_nav_mode',
+    "TEXT DEFAULT 'horizontal'",
+  );
+  ensureColumn(
+    'registered_groups',
+    'binding_mode',
+    "TEXT DEFAULT 'single_context'",
+  );
+  ensureColumn('registered_groups', 'feishu_chat_mode', 'TEXT');
+  ensureColumn('registered_groups', 'feishu_group_message_type', 'TEXT');
   ensureColumn('messages', 'token_usage', 'TEXT');
   ensureColumn('messages', 'turn_id', 'TEXT');
   ensureColumn('messages', 'session_id', 'TEXT');
   ensureColumn('messages', 'sdk_message_uuid', 'TEXT');
   ensureColumn('messages', 'source_kind', 'TEXT');
   ensureColumn('messages', 'finalization_reason', 'TEXT');
+  ensureColumn('agents', 'source_kind', 'TEXT');
+  ensureColumn('agents', 'thread_id', 'TEXT');
+  ensureColumn('agents', 'root_message_id', 'TEXT');
+  ensureColumn('agents', 'title_source', 'TEXT');
+  ensureColumn('agents', 'last_active_at', 'TEXT');
 
   // Add index on target_agent_id for fast lookup of IM bindings
   db.exec(
@@ -1190,7 +1233,7 @@ export function initDatabase(): void {
     db.exec('ALTER TABLE agents ADD COLUMN spawned_from_jid TEXT');
   }
 
-  const SCHEMA_VERSION = '33';
+  const SCHEMA_VERSION = '34';
   db.prepare(
     'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
   ).run('schema_version', SCHEMA_VERSION);
@@ -2222,6 +2265,11 @@ type RegisteredGroupRow = {
   owner_im_id: string | null;
   mcp_mode: string | null;
   selected_mcps: string | null;
+  conversation_source: string | null;
+  conversation_nav_mode: string | null;
+  binding_mode: string | null;
+  feishu_chat_mode: string | null;
+  feishu_group_message_type: string | null;
 };
 
 /** Convert a raw DB row into a RegisteredGroup domain object. */
@@ -2248,6 +2296,16 @@ function parseGroupRow(
     require_mention: row.require_mention === 1,
     activation_mode: parseActivationMode(row.activation_mode),
     owner_im_id: row.owner_im_id ?? undefined,
+    conversation_source:
+      row.conversation_source === 'feishu_thread' ? 'feishu_thread' : 'manual',
+    conversation_nav_mode:
+      row.conversation_nav_mode === 'vertical_threads'
+        ? 'vertical_threads'
+        : 'horizontal',
+    binding_mode:
+      row.binding_mode === 'thread_map' ? 'thread_map' : 'single_context',
+    feishu_chat_mode: row.feishu_chat_mode ?? undefined,
+    feishu_group_message_type: row.feishu_group_message_type ?? undefined,
   };
 }
 
@@ -2279,8 +2337,8 @@ export function getRegisteredGroup(
 
 export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
   db.prepare(
-    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, execution_mode, custom_cwd, init_source_path, init_git_url, created_by, is_home, selected_skills, target_agent_id, target_main_jid, reply_policy, require_mention, activation_mode, owner_im_id, mcp_mode, selected_mcps)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, execution_mode, custom_cwd, init_source_path, init_git_url, created_by, is_home, selected_skills, target_agent_id, target_main_jid, reply_policy, require_mention, activation_mode, owner_im_id, mcp_mode, selected_mcps, conversation_source, conversation_nav_mode, binding_mode, feishu_chat_mode, feishu_group_message_type)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     jid,
     group.name,
@@ -2302,6 +2360,11 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
     group.owner_im_id ?? null,
     'inherit', // mcp_mode: deprecated, always inherit (user-level MCP applies globally)
     null, // selected_mcps: deprecated, always null
+    group.conversation_source ?? 'manual',
+    group.conversation_nav_mode ?? 'horizontal',
+    group.binding_mode ?? 'single_context',
+    group.feishu_chat_mode ?? null,
+    group.feishu_group_message_type ?? null,
   );
 }
 
@@ -2361,6 +2424,108 @@ export function getGroupsByTargetMainJid(
     .prepare('SELECT * FROM registered_groups WHERE target_main_jid = ?')
     .all(webJid) as RegisteredGroupRow[];
   return rows.map((row) => ({ jid: row.jid, group: parseGroupRow(row) }));
+}
+
+function mapImContextBindingRow(
+  row: Record<string, unknown>,
+): ImContextBinding {
+  return {
+    source_jid: String(row.source_jid),
+    context_type: 'thread',
+    context_id: String(row.context_id),
+    workspace_jid: String(row.workspace_jid),
+    agent_id: String(row.agent_id),
+    root_message_id:
+      typeof row.root_message_id === 'string' ? row.root_message_id : null,
+    title: typeof row.title === 'string' ? row.title : null,
+    last_active_at: String(row.last_active_at),
+    created_at: String(row.created_at),
+    updated_at: String(row.updated_at),
+  };
+}
+
+export function getImContextBinding(
+  sourceJid: string,
+  contextType: 'thread',
+  contextId: string,
+): ImContextBinding | undefined {
+  const row = db
+    .prepare(
+      'SELECT * FROM im_context_bindings WHERE source_jid = ? AND context_type = ? AND context_id = ?',
+    )
+    .get(sourceJid, contextType, contextId) as Record<string, unknown> | undefined;
+  return row ? mapImContextBindingRow(row) : undefined;
+}
+
+export function upsertImContextBinding(binding: ImContextBinding): void {
+  db.prepare(
+    `INSERT INTO im_context_bindings (
+      source_jid, context_type, context_id, workspace_jid, agent_id,
+      root_message_id, title, last_active_at, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(source_jid, context_type, context_id) DO UPDATE SET
+      workspace_jid = excluded.workspace_jid,
+      agent_id = excluded.agent_id,
+      -- COALESCE: 首条消息设定 root_message_id/title 后，后续消息传 null 不会覆盖
+      root_message_id = COALESCE(excluded.root_message_id, im_context_bindings.root_message_id),
+      title = COALESCE(excluded.title, im_context_bindings.title),
+      last_active_at = excluded.last_active_at,
+      updated_at = excluded.updated_at`,
+  ).run(
+    binding.source_jid,
+    binding.context_type,
+    binding.context_id,
+    binding.workspace_jid,
+    binding.agent_id,
+    binding.root_message_id,
+    binding.title,
+    binding.last_active_at,
+    binding.created_at,
+    binding.updated_at,
+  );
+}
+
+export function listImContextBindingsByWorkspace(
+  workspaceJid: string,
+): ImContextBinding[] {
+  const rows = db
+    .prepare(
+      'SELECT * FROM im_context_bindings WHERE workspace_jid = ? ORDER BY last_active_at DESC, created_at DESC',
+    )
+    .all(workspaceJid) as Record<string, unknown>[];
+  return rows.map(mapImContextBindingRow);
+}
+
+export function deleteImContextBindingsByWorkspace(workspaceJid: string): void {
+  db.prepare('DELETE FROM im_context_bindings WHERE workspace_jid = ?').run(
+    workspaceJid,
+  );
+}
+
+export function deleteImContextBindingsByAgent(agentId: string): void {
+  db.prepare('DELETE FROM im_context_bindings WHERE agent_id = ?').run(agentId);
+}
+
+/** Lightweight update: only touch last_active_at + updated_at on an existing binding. */
+export function touchImContextBindingActivity(
+  sourceJid: string,
+  contextType: 'thread',
+  contextId: string,
+  lastActiveAt: string,
+): void {
+  db.prepare(
+    'UPDATE im_context_bindings SET last_active_at = ?, updated_at = ? WHERE source_jid = ? AND context_type = ? AND context_id = ?',
+  ).run(lastActiveAt, lastActiveAt, sourceJid, contextType, contextId);
+}
+
+/** List feishu_thread agent IDs for a workspace JID (for cleanup on unbind). */
+export function listFeishuThreadAgentIds(workspaceJid: string): string[] {
+  const rows = db
+    .prepare(
+      "SELECT id FROM agents WHERE chat_jid = ? AND source_kind = 'feishu_thread'",
+    )
+    .all(workspaceJid) as { id: string }[];
+  return rows.map((r) => r.id);
 }
 
 /**
@@ -3785,8 +3950,8 @@ export function getUserMemberFolders(
 
 export function createAgent(agent: SubAgent): void {
   db.prepare(
-    `INSERT INTO agents (id, group_folder, chat_jid, name, prompt, status, kind, created_by, created_at, completed_at, result_summary, spawned_from_jid)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO agents (id, group_folder, chat_jid, name, prompt, status, kind, created_by, created_at, completed_at, result_summary, spawned_from_jid, source_kind, thread_id, root_message_id, title_source, last_active_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     agent.id,
     agent.group_folder,
@@ -3800,6 +3965,11 @@ export function createAgent(agent: SubAgent): void {
     agent.completed_at ?? null,
     agent.result_summary ?? null,
     agent.spawned_from_jid ?? null,
+    agent.source_kind ?? null,
+    agent.thread_id ?? null,
+    agent.root_message_id ?? null,
+    agent.title_source ?? null,
+    agent.last_active_at ?? null,
   );
 }
 
@@ -3858,6 +4028,53 @@ export function updateAgentInfo(
     name,
     prompt,
     id,
+  );
+}
+
+export function updateAgentContextInfo(
+  id: string,
+  updates: Partial<
+    Pick<
+      SubAgent,
+      | 'name'
+      | 'source_kind'
+      | 'thread_id'
+      | 'root_message_id'
+      | 'title_source'
+      | 'last_active_at'
+    >
+  >,
+): void {
+  const fields: string[] = [];
+  const values: unknown[] = [];
+  if (updates.name !== undefined) {
+    fields.push('name = ?');
+    values.push(updates.name);
+  }
+  if (updates.source_kind !== undefined) {
+    fields.push('source_kind = ?');
+    values.push(updates.source_kind);
+  }
+  if (updates.thread_id !== undefined) {
+    fields.push('thread_id = ?');
+    values.push(updates.thread_id);
+  }
+  if (updates.root_message_id !== undefined) {
+    fields.push('root_message_id = ?');
+    values.push(updates.root_message_id);
+  }
+  if (updates.title_source !== undefined) {
+    fields.push('title_source = ?');
+    values.push(updates.title_source);
+  }
+  if (updates.last_active_at !== undefined) {
+    fields.push('last_active_at = ?');
+    values.push(updates.last_active_at);
+  }
+  if (fields.length === 0) return;
+  values.push(id);
+  db.prepare(`UPDATE agents SET ${fields.join(', ')} WHERE id = ?`).run(
+    ...values,
   );
 }
 
@@ -3932,6 +4149,7 @@ export function listActiveConversationAgents(): SubAgent[] {
 export function deleteAgent(id: string): void {
   // Delete associated session
   db.prepare('DELETE FROM sessions WHERE agent_id = ?').run(id);
+  deleteImContextBindingsByAgent(id);
   db.prepare('DELETE FROM agents WHERE id = ?').run(id);
 }
 
@@ -3954,6 +4172,19 @@ function mapAgentRow(row: Record<string, unknown>): SubAgent {
       typeof row.last_im_jid === 'string' ? row.last_im_jid : null,
     spawned_from_jid:
       typeof row.spawned_from_jid === 'string' ? row.spawned_from_jid : null,
+    source_kind:
+      typeof row.source_kind === 'string'
+        ? (row.source_kind as 'manual' | 'feishu_thread')
+        : null,
+    thread_id: typeof row.thread_id === 'string' ? row.thread_id : null,
+    root_message_id:
+      typeof row.root_message_id === 'string' ? row.root_message_id : null,
+    title_source:
+      typeof row.title_source === 'string'
+        ? (row.title_source as 'manual' | 'feishu_root')
+        : null,
+    last_active_at:
+      typeof row.last_active_at === 'string' ? row.last_active_at : null,
   };
 }
 

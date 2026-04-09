@@ -71,6 +71,7 @@ import {
   getAgent,
   isGroupShared,
   getUserById,
+  updateAgentContextInfo,
 } from './db.js';
 import { isSessionExpired, verifySessionToken } from './auth.js';
 import type {
@@ -424,6 +425,7 @@ async function handleAgentConversationMessage(
     false,
     { attachments: attachmentsStr },
   );
+  updateAgentContextInfo(agentId, { last_active_at: timestamp });
 
   // Broadcast new_message with agentId so frontend routes to agent tab
   broadcastNewMessage(

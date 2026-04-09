@@ -22,6 +22,7 @@ import {
   getStreamingSession,
 } from './feishu-streaming-card.js';
 import { optimizeMarkdownStyle } from './feishu-markdown-style.js';
+import type { FeishuMessageMeta } from './types.js';
 
 // ─── FeishuConnection Interface ────────────────────────────────
 
@@ -49,6 +50,7 @@ export interface ConnectOptions {
   /** 将 IM chatJid 解析为绑定目标 JID（conversation agent 或工作区主对话） */
   resolveEffectiveChatJid?: (
     chatJid: string,
+    messageMeta?: FeishuMessageMeta,
   ) => { effectiveJid: string; agentId: string | null } | null;
   /** 当 IM 消息被路由到 conversation agent 后调用 */
   onAgentMessage?: (baseChatJid: string, agentId: string) => void;
@@ -69,7 +71,8 @@ export interface FeishuChatInfo {
   name?: string;
   user_count?: string;
   chat_type?: string;
-  chat_mode?: string; // 'p2p' | 'group'
+  chat_mode?: string; // 'p2p' | 'group' | 'topic'
+  group_message_type?: string; // 'chat' | 'thread'
 }
 
 export interface FeishuConnection {
@@ -123,6 +126,9 @@ interface FeishuMentionLike {
 interface IncomingMessagePayload {
   chatId: string;
   messageId: string;
+  rootId?: string;
+  parentId?: string;
+  threadId?: string;
   createTimeMs: number;
   messageType: string;
   content: string;
@@ -142,6 +148,27 @@ function toEpochMs(value: string | number | undefined): number {
   const numeric = typeof value === 'number' ? value : Number(value ?? 0);
   if (!Number.isFinite(numeric) || numeric <= 0) return 0;
   return numeric < 1e12 ? Math.trunc(numeric * 1000) : Math.trunc(numeric);
+}
+
+export interface FeishuRouteTarget {
+  raw: string;
+  chatId: string;
+  threadId?: string;
+  rootMessageId?: string;
+}
+
+export function parseFeishuRouteTarget(raw: string): FeishuRouteTarget {
+  const [chatId, ...parts] = raw.split('#');
+  let threadId: string | undefined;
+  let rootMessageId: string | undefined;
+  for (const part of parts) {
+    if (part.startsWith('thread:')) {
+      threadId = part.slice('thread:'.length);
+    } else if (part.startsWith('root:')) {
+      rootMessageId = part.slice('root:'.length);
+    }
+  }
+  return { raw, chatId, threadId, rootMessageId };
 }
 
 /**
@@ -820,20 +847,47 @@ export function createFeishuConnection(
     }
   }
 
+  /**
+   * Low-level send: route to reply (thread-aware) or create, based on target.
+   * Uses rootMessageId for thread routing, falls back to lastMessageIdByChat for reply context.
+   */
+  async function sendToFeishu(
+    chatId: string,
+    msgType: string,
+    content: string,
+  ): Promise<void> {
+    if (!client) return;
+    const target = parseFeishuRouteTarget(chatId);
+    const receiveIdType = target.chatId.startsWith('oc_')
+      ? 'chat_id'
+      : 'open_id';
+    const replyMsgId =
+      target.rootMessageId || lastMessageIdByChat.get(target.chatId);
+    if (replyMsgId) {
+      await client.im.message.reply({
+        path: { message_id: replyMsgId },
+        data: {
+          content,
+          msg_type: msgType,
+          ...(target.rootMessageId ? { reply_in_thread: true } : {}),
+        },
+      });
+    } else {
+      await client.im.v1.message.create({
+        params: { receive_id_type: receiveIdType },
+        data: {
+          receive_id: target.chatId,
+          msg_type: msgType,
+          content,
+        },
+      });
+    }
+  }
+
   async function sendTextToChat(chatId: string, text: string): Promise<void> {
     if (!client) return;
     try {
-      const receive_id_type = chatId.startsWith('oc_')
-        ? 'chat_id'
-        : 'open_id';
-      await client.im.v1.message.create({
-        params: { receive_id_type },
-        data: {
-          receive_id: chatId,
-          msg_type: 'text',
-          content: JSON.stringify({ text }),
-        },
-      });
+      await sendToFeishu(chatId, 'text', JSON.stringify({ text }));
     } catch (err) {
       logger.error({ chatId, err }, 'Failed to send Feishu text reply');
     }
@@ -856,6 +910,9 @@ export function createFeishuConnection(
     const {
       chatId,
       messageId,
+      rootId,
+      parentId,
+      threadId,
       createTimeMs,
       messageType,
       content: rawContent,
@@ -1109,7 +1166,16 @@ export function createFeishuConnection(
     }
 
     // Store message and broadcast to WebSocket clients
-    const agentRouting = resolveEffectiveChatJid?.(chatJid);
+    const routeSourceJid =
+      threadId && (rootId || messageId)
+        ? `feishu:${chatId}#thread:${threadId}#root:${rootId || messageId}`
+        : chatJid;
+    const agentRouting = resolveEffectiveChatJid?.(chatJid, {
+      threadId,
+      rootId: rootId || messageId,
+      parentId,
+      text,
+    });
     const targetJid = agentRouting?.effectiveJid ?? chatJid;
 
     const targetAgentId = agentRouting?.agentId;
@@ -1123,14 +1189,14 @@ export function createFeishuConnection(
       text,
       timestamp,
       false,
-      { attachments: attachmentsJson, sourceJid: chatJid },
+      { attachments: attachmentsJson, sourceJid: routeSourceJid },
     );
     broadcastNewMessage(
       targetJid,
       {
         id: messageId,
         chat_jid: targetJid,
-        source_jid: chatJid,
+        source_jid: routeSourceJid,
         sender: senderOpenId,
         sender_name: resolvedSenderName,
         content: text,
@@ -1212,8 +1278,12 @@ export function createFeishuConnection(
             chat_type?: string;
             mentions?: FeishuMentionLike[];
             deleted?: boolean;
+            root_id?: string;
+            parent_id?: string;
+            thread_id?: string;
             sender?: {
               id?: string;
+              sender_type?: string;
               sender_id?: {
                 open_id?: string;
               };
@@ -1229,7 +1299,7 @@ export function createFeishuConnection(
         .filter((item) => {
           if (item.deleted === true || !item.message_id) return false;
           // 过滤 Bot 自身发送的消息，避免 backfill 将回复当作新消息处理
-          const senderType = (item as any).sender?.sender_type;
+          const senderType = item.sender?.sender_type;
           if (senderType === 'app') return false;
           return true;
         })
@@ -1239,6 +1309,9 @@ export function createFeishuConnection(
           return {
             chatId,
             messageId: item.message_id as string,
+            rootId: item.root_id || undefined,
+            parentId: item.parent_id || undefined,
+            threadId: item.thread_id || undefined,
             createTimeMs: toEpochMs(item.create_time),
             messageType: item.msg_type || item.message_type || '',
             content: item.body?.content || item.content || '',
@@ -1430,6 +1503,9 @@ export function createFeishuConnection(
               {
                 chatId: message.chat_id,
                 messageId: message.message_id,
+                rootId: message.root_id,
+                parentId: message.parent_id,
+                threadId: message.thread_id,
                 createTimeMs: toEpochMs(message.create_time),
                 messageType: message.message_type,
                 content: message.content,
@@ -1585,22 +1661,7 @@ export function createFeishuConnection(
           try {
             const parsed = JSON.parse(text);
             if (parsed.type === 'interactive' && parsed.card) {
-              const lastMsgId = lastMessageIdByChat.get(chatId);
-              if (lastMsgId) {
-                await client.im.message.reply({
-                  path: { message_id: lastMsgId },
-                  data: { content: text, msg_type: 'interactive' },
-                });
-              } else {
-                await client.im.v1.message.create({
-                  params: { receive_id_type: 'chat_id' },
-                  data: {
-                    receive_id: chatId,
-                    msg_type: 'interactive',
-                    content: text,
-                  },
-                });
-              }
+              await sendToFeishu(chatId,'interactive', text);
               clearAckReaction();
               return;
             }
@@ -1617,70 +1678,18 @@ export function createFeishuConnection(
         if (usePostMd) {
           // Too many tables for card format, go directly to post+md
           const postContent = buildPostMdFallback(text);
-          const lastMsgId = lastMessageIdByChat.get(chatId);
-          if (lastMsgId) {
-            await client.im.message.reply({
-              path: { message_id: lastMsgId },
-              data: { content: postContent, msg_type: 'post' },
-            });
-          } else {
-            await client.im.v1.message.create({
-              params: { receive_id_type: 'chat_id' },
-              data: {
-                receive_id: chatId,
-                msg_type: 'post',
-                content: postContent,
-              },
-            });
-          }
+          await sendToFeishu(chatId,'post', postContent);
         } else {
           const card = buildInteractiveCard(text);
           const content = JSON.stringify(card);
-
-          const lastMsgId = lastMessageIdByChat.get(chatId);
-          if (lastMsgId) {
-            try {
-              await client.im.message.reply({
-                path: { message_id: lastMsgId },
-                data: { content, msg_type: 'interactive' },
-              });
-            } catch (err) {
-              logger.warn(
-                { err, chatId },
-                'Feishu interactive reply failed, fallback to post+md',
-              );
-              await client.im.message.reply({
-                path: { message_id: lastMsgId },
-                data: {
-                  content: buildPostMdFallback(text),
-                  msg_type: 'post',
-                },
-              });
-            }
-          } else {
-            try {
-              await client.im.v1.message.create({
-                params: { receive_id_type: 'chat_id' },
-                data: {
-                  receive_id: chatId,
-                  msg_type: 'interactive',
-                  content,
-                },
-              });
-            } catch (err) {
-              logger.warn(
-                { err, chatId },
-                'Feishu interactive create failed, fallback to post+md',
-              );
-              await client.im.v1.message.create({
-                params: { receive_id_type: 'chat_id' },
-                data: {
-                  receive_id: chatId,
-                  msg_type: 'post',
-                  content: buildPostMdFallback(text),
-                },
-              });
-            }
+          try {
+            await sendToFeishu(chatId,'interactive', content);
+          } catch (err) {
+            logger.warn(
+              { err, chatId },
+              'Feishu interactive send failed, fallback to post+md',
+            );
+            await sendToFeishu(chatId,'post', buildPostMdFallback(text));
           }
         }
         logger.debug({ chatId }, 'Sent Feishu card message');
@@ -1706,14 +1715,7 @@ export function createFeishuConnection(
               );
               continue;
             }
-            await client.im.v1.message.create({
-              params: { receive_id_type: 'chat_id' },
-              data: {
-                receive_id: chatId,
-                msg_type: 'image',
-                content: JSON.stringify({ image_key: imageKey }),
-              },
-            });
+            await sendToFeishu(chatId,'image', JSON.stringify({ image_key: imageKey }));
           } catch (imageErr) {
             logger.warn(
               { chatId, localImagePath, err: imageErr },
@@ -1767,39 +1769,11 @@ export function createFeishuConnection(
         }
 
         // Step 2: Send image message
-        // receive_id_type: group chat ids start with "oc_", DM open_ids start with "ou_"
-        const receive_id_type = chatId.startsWith('oc_')
-          ? 'chat_id'
-          : 'open_id';
-        const lastMsgId = lastMessageIdByChat.get(chatId);
-        const content = JSON.stringify({ image_key: imageKey });
-
-        if (lastMsgId) {
-          await client.im.message.reply({
-            path: { message_id: lastMsgId },
-            data: { content, msg_type: 'image' },
-          });
-        } else {
-          await client.im.v1.message.create({
-            params: { receive_id_type },
-            data: {
-              receive_id: chatId,
-              msg_type: 'image',
-              content,
-            },
-          });
-        }
+        await sendToFeishu(chatId, 'image', JSON.stringify({ image_key: imageKey }));
 
         // Step 3: If caption provided, send it as a follow-up text message
         if (caption) {
-          await client.im.v1.message.create({
-            params: { receive_id_type },
-            data: {
-              receive_id: chatId,
-              msg_type: 'text',
-              content: JSON.stringify({ text: caption }),
-            },
-          });
+          await sendToFeishu(chatId, 'text', JSON.stringify({ text: caption }));
         }
 
         logger.info(
@@ -1858,17 +1832,7 @@ export function createFeishuConnection(
         }
 
         // Send file message
-        const receive_id_type = chatId.startsWith('oc_')
-          ? 'chat_id'
-          : 'open_id';
-        await client.im.v1.message.create({
-          params: { receive_id_type },
-          data: {
-            receive_id: chatId,
-            msg_type: 'file',
-            content: JSON.stringify({ file_key: fileKey }),
-          },
-        });
+        await sendToFeishu(chatId, 'file', JSON.stringify({ file_key: fileKey }));
 
         logger.info(
           { chatId, fileName, fileSize: buffer.length },
@@ -1885,30 +1849,34 @@ export function createFeishuConnection(
 
     async sendReaction(chatId: string, isTyping: boolean): Promise<void> {
       if (!client) return;
-      const lastMsgId = lastMessageIdByChat.get(chatId);
+      const target = parseFeishuRouteTarget(chatId);
+      const reactionKey = target.chatId;
+      const lastMsgId =
+        target.rootMessageId || lastMessageIdByChat.get(target.chatId);
       if (!lastMsgId) return;
 
       if (isTyping) {
         const reactionId = await addReaction(lastMsgId, 'OnIt');
         if (reactionId) {
-          typingReactionByChat.set(chatId, `${lastMsgId}:${reactionId}`);
+          typingReactionByChat.set(reactionKey, `${lastMsgId}:${reactionId}`);
         }
       } else {
-        const stored = typingReactionByChat.get(chatId);
+        const stored = typingReactionByChat.get(reactionKey);
         if (stored) {
           const [msgId, reactionId] = stored.split(':');
           await removeReaction(msgId, reactionId);
-          typingReactionByChat.delete(chatId);
+          typingReactionByChat.delete(reactionKey);
         }
       }
     },
 
     clearAckReaction(chatId: string): void {
-      const ackStored = ackReactionByChat.get(chatId);
+      const target = parseFeishuRouteTarget(chatId);
+      const ackStored = ackReactionByChat.get(target.chatId);
       if (ackStored) {
         const [ackMsgId, ackReactionId] = ackStored.split(':');
         removeReaction(ackMsgId, ackReactionId).catch(() => {});
-        ackReactionByChat.delete(chatId);
+        ackReactionByChat.delete(target.chatId);
       }
     },
 
@@ -1919,8 +1887,9 @@ export function createFeishuConnection(
     async getChatInfo(chatId: string): Promise<FeishuChatInfo | null> {
       if (!client) return null;
       try {
+        const target = parseFeishuRouteTarget(chatId);
         const res = await client.im.v1.chat.get({
-          path: { chat_id: chatId },
+          path: { chat_id: target.chatId },
         });
         if (!res.data) return null;
         return {
@@ -1929,6 +1898,7 @@ export function createFeishuConnection(
           user_count: res.data.user_count,
           chat_type: res.data.chat_type,
           chat_mode: res.data.chat_mode,
+          group_message_type: (res.data as { group_message_type?: string }).group_message_type,
         };
       } catch (err) {
         logger.warn({ err, chatId }, 'Failed to get Feishu chat info');
@@ -1977,7 +1947,8 @@ export function createFeishuConnection(
     },
 
     getLastMessageId(chatId: string): string | undefined {
-      return lastMessageIdByChat.get(chatId);
+      const target = parseFeishuRouteTarget(chatId);
+      return target.rootMessageId || lastMessageIdByChat.get(target.chatId);
     },
   };
 

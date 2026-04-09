@@ -34,6 +34,17 @@ export interface ContainerConfig {
 }
 
 export type ExecutionMode = 'container' | 'host';
+export type ConversationSource = 'manual' | 'feishu_thread';
+export type ConversationNavMode = 'horizontal' | 'vertical_threads';
+export type ImBindingMode = 'single_context' | 'thread_map';
+
+/** 飞书消息的话题/线程元数据，用于 thread_map 路由 */
+export interface FeishuMessageMeta {
+  threadId?: string;
+  rootId?: string;
+  parentId?: string;
+  text?: string;
+}
 
 export interface RegisteredGroup {
   name: string;
@@ -54,6 +65,11 @@ export interface RegisteredGroup {
   owner_im_id?: string; // activation_mode 为 'owner_mentioned' 时，仅此 IM 标识符的发送者被响应
   mcp_mode?: 'inherit' | 'custom'; // MCP 配置模式（默认 'inherit' 继承用户配置）
   selected_mcps?: string[] | null; // custom 模式下选中的 MCP server IDs
+  conversation_source?: ConversationSource; // 工作区会话来源（默认 manual）
+  conversation_nav_mode?: ConversationNavMode; // 工作区会话导航模式（默认 horizontal）
+  binding_mode?: ImBindingMode; // IM 绑定模式（默认 single_context）
+  feishu_chat_mode?: string; // 飞书群模式：group/topic/p2p 等
+  feishu_group_message_type?: string; // 飞书群消息形式：chat/thread
 }
 
 export interface GroupMember {
@@ -303,6 +319,24 @@ export interface SubAgent {
   last_im_jid: string | null;
   /** 发起 /spawn 命令的源会话 JID，用于完成后结果回注 */
   spawned_from_jid: string | null;
+  source_kind?: 'manual' | 'feishu_thread' | null;
+  thread_id?: string | null;
+  root_message_id?: string | null;
+  title_source?: 'manual' | 'feishu_root' | null;
+  last_active_at?: string | null;
+}
+
+export interface ImContextBinding {
+  source_jid: string;
+  context_type: 'thread';
+  context_id: string;
+  workspace_jid: string;
+  agent_id: string;
+  root_message_id: string | null;
+  title: string | null;
+  last_active_at: string;
+  created_at: string;
+  updated_at: string;
 }
 
 // WebSocket message types

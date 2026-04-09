@@ -83,6 +83,10 @@ import {
   cleanupOldDailyUsage,
   cleanupOldBillingAuditLog,
   insertUsageRecord,
+  getImContextBinding,
+  upsertImContextBinding,
+  touchImContextBindingActivity,
+  updateAgentContextInfo,
 } from './db.js';
 // feishu.js deprecated exports are no longer needed; imManager handles all connections
 import { imManager } from './im-manager.js';
@@ -140,6 +144,7 @@ import {
 } from './billing.js';
 import {
   AgentStatus,
+  FeishuMessageMeta,
   MessageCursor,
   NewMessage,
   RegisteredGroup,
@@ -502,6 +507,7 @@ const RELATIVE_IMAGE_EXTENSIONS = new Set([
   '.bmp',
   '.svg',
 ]);
+const FEISHU_THREAD_TITLE_MAX_LEN = 48;
 
 /** Unbind an IM group from its conversation agent or main conversation, syncing DB + in-memory cache + failure counters. */
 function unbindImGroup(jid: string, reason: string): void {
@@ -4139,7 +4145,11 @@ function startIpcWatcher(): void {
                   // For conversation agents, use activeImReplyRoutes (the IM
                   // channel this conversation agent is bound to — e.g. DingTalk JID).
                   const imgImRoute = ipcAgentId
-                    ? (activeImReplyRoutes.get(sourceGroup) ?? null)
+                    ? (activeImReplyRoutes.get(
+                        `${data.chatJid}#agent:${ipcAgentId}`,
+                      ) ??
+                      activeImReplyRoutes.get(sourceGroup) ??
+                      null)
                     : getChannelType(data.chatJid) !== null
                       ? data.chatJid
                       : (activeImReplyRoutes.get(sourceGroup) ?? null);
@@ -4967,7 +4977,12 @@ async function processTaskIpc(
               const warnMsg = `⚠️ 文件 "${data.fileName}" 未找到（路径 "${data.filePath}" 不存在）。请引导用户确认正确的文件路径，或使用 'send_file' 时提供正确的相对路径。`;
               broadcastToWebClients(sourceGroup, warnMsg);
               // Also notify via DingTalk for conversation agents bound to IM
-              const imRoute = activeImReplyRoutes.get(sourceGroup);
+              const imRoute =
+                (ipcAgentId && data.chatJid
+                  ? activeImReplyRoutes.get(
+                      `${data.chatJid}#agent:${ipcAgentId}`,
+                    )
+                  : null) ?? activeImReplyRoutes.get(sourceGroup);
               if (imRoute) {
                 try {
                   await imManager.sendMessage(imRoute, warnMsg);
@@ -4986,7 +5001,9 @@ async function processTaskIpc(
           // Route to IM: for conversation agents, use activeImReplyRoutes (the IM
           // channel this conversation agent is bound to — e.g. DingTalk group JID).
           const fileImRoute = ipcAgentId
-            ? (activeImReplyRoutes.get(sourceGroup) ?? null)
+            ? (activeImReplyRoutes.get(`${data.chatJid}#agent:${ipcAgentId}`) ??
+              activeImReplyRoutes.get(sourceGroup) ??
+              null)
             : getChannelType(data.chatJid) !== null
               ? data.chatJid
               : (activeImReplyRoutes.get(sourceGroup) ?? null);
@@ -5143,7 +5160,14 @@ async function processAgentConversation(
     updateAgentLastImJid(agentId, replySourceImJid);
     // Also publish to activeImReplyRoutes so send_file/send_image IPC can route to IM.
     activeImReplyRoutes.set(effectiveGroup.folder, replySourceImJid);
+    activeImReplyRoutes.set(virtualChatJid, replySourceImJid);
   }
+
+  updateAgentContextInfo(agentId, {
+    last_active_at:
+      missedMessages[missedMessages.length - 1]?.timestamp ||
+      new Date().toISOString(),
+  });
 
   // ── Feishu Streaming Card (conversation agent) ──
   // Unlike processGroupMessages which falls back to chatJid, conversation agents
@@ -5857,6 +5881,7 @@ async function processAgentConversation(
       hadError ? lastError : undefined,
     );
 
+    activeImReplyRoutes.delete(virtualChatJid);
     ipcWatcherManager?.unwatchGroup(effectiveGroup.folder);
   }
 }
@@ -6417,6 +6442,45 @@ function buildIsChatAuthorized(userId: string): (jid: string) => boolean {
   };
 }
 
+function resolveWorkspaceJid(targetMainJid: string): string | null {
+  let effectiveJid = targetMainJid;
+  if (
+    !registeredGroups[effectiveJid] &&
+    !getRegisteredGroup(effectiveJid) &&
+    effectiveJid.startsWith('web:')
+  ) {
+    const folder = effectiveJid.slice(4);
+    const jids = getJidsByFolder(folder);
+    for (const j of jids) {
+      if (j.startsWith('web:')) {
+        effectiveJid = j;
+        break;
+      }
+    }
+  }
+  return registeredGroups[effectiveJid] || getRegisteredGroup(effectiveJid)
+    ? effectiveJid
+    : null;
+}
+
+function buildFeishuThreadRouteJid(
+  chatJid: string,
+  threadId: string,
+  rootMessageId: string,
+): string {
+  return `feishu:${extractChatId(chatJid)}#thread:${threadId}#root:${rootMessageId}`;
+}
+
+function summarizeFeishuThreadTitle(text?: string): string {
+  const firstLine = (text || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean);
+  const normalized = (firstLine || '飞书话题').replace(/\s+/g, ' ').trim();
+  if (normalized.length <= FEISHU_THREAD_TITLE_MAX_LEN) return normalized;
+  return `${normalized.slice(0, FEISHU_THREAD_TITLE_MAX_LEN - 1)}…`;
+}
+
 function buildOnPairAttempt(
   userId: string,
 ): (jid: string, chatName: string, code: string) => Promise<boolean> {
@@ -6432,6 +6496,110 @@ function buildOnPairAttempt(
 }
 
 /**
+ * Resolve or create a conversation agent for a Feishu thread.
+ * Creates the agent + binding on first message; updates activity on subsequent messages.
+ * Side effects: DB writes, WS broadcasts, directory creation.
+ */
+function resolveOrCreateThreadAgent(
+  chatJid: string,
+  workspaceJid: string,
+  workspace: RegisteredGroup,
+  group: RegisteredGroup,
+  messageMeta: FeishuMessageMeta & { threadId: string },
+): { effectiveJid: string; agentId: string } {
+  const now = new Date().toISOString();
+  const threadId = messageMeta.threadId;
+  const rootMessageId = messageMeta.rootId || threadId;
+  const routeJid = buildFeishuThreadRouteJid(chatJid, threadId, rootMessageId);
+  const nextTitle = summarizeFeishuThreadTitle(messageMeta.text);
+  let binding = getImContextBinding(chatJid, 'thread', threadId);
+  let agent = binding?.agent_id != null ? getAgent(binding.agent_id) : undefined;
+
+  if (!binding || !agent || agent.chat_jid !== workspaceJid) {
+    const agentId = crypto.randomUUID();
+    const agentName = binding?.title || nextTitle;
+    const newAgent: SubAgent = {
+      id: agentId,
+      group_folder: workspace.folder,
+      chat_jid: workspaceJid,
+      name: agentName,
+      prompt: '',
+      status: 'idle',
+      kind: 'conversation',
+      created_by: workspace.created_by || group.created_by || null,
+      created_at: now,
+      completed_at: null,
+      result_summary: null,
+      last_im_jid: routeJid,
+      spawned_from_jid: null,
+      source_kind: 'feishu_thread',
+      thread_id: threadId,
+      root_message_id: rootMessageId,
+      title_source: 'feishu_root',
+      last_active_at: now,
+    };
+    createAgent(newAgent);
+    ensureAgentDirectories(workspace.folder, agentId);
+    const virtualChatJid = `${workspaceJid}#agent:${agentId}`;
+    ensureChatExists(virtualChatJid);
+    updateChatName(virtualChatJid, agentName);
+    updateAgentLastImJid(agentId, routeJid);
+    broadcastAgentStatus(
+      workspaceJid,
+      agentId,
+      'idle',
+      agentName,
+      '',
+      undefined,
+      'conversation',
+    );
+    binding = {
+      source_jid: chatJid,
+      context_type: 'thread',
+      context_id: threadId,
+      workspace_jid: workspaceJid,
+      agent_id: agentId,
+      root_message_id: rootMessageId,
+      title: agentName,
+      last_active_at: now,
+      created_at: now,
+      updated_at: now,
+    };
+    upsertImContextBinding(binding);
+    agent = newAgent;
+  }
+
+  const resolvedTitle = binding.title || nextTitle;
+  // Skip redundant writes for steady-state messages (only update timestamps)
+  const titleChanged = resolvedTitle !== binding.title;
+  const rootChanged = rootMessageId !== binding.root_message_id;
+  if (titleChanged || rootChanged) {
+    upsertImContextBinding({
+      ...binding,
+      root_message_id: rootMessageId,
+      title: resolvedTitle,
+      last_active_at: now,
+      updated_at: now,
+    });
+    updateAgentContextInfo(binding.agent_id, {
+      name: resolvedTitle,
+      last_active_at: now,
+      ...(rootChanged ? { root_message_id: rootMessageId } : {}),
+    });
+    updateChatName(`${workspaceJid}#agent:${binding.agent_id}`, resolvedTitle);
+  } else {
+    // Lightweight: only touch activity timestamps
+    touchImContextBindingActivity(chatJid, 'thread', threadId, now);
+    updateAgentContextInfo(binding.agent_id, { last_active_at: now });
+  }
+  updateAgentLastImJid(binding.agent_id, routeJid);
+  return {
+    effectiveJid: `${workspaceJid}#agent:${binding.agent_id}`,
+    agentId: binding.agent_id,
+  };
+}
+
+/**
  * Build callback that resolves an IM chatJid to a bound target JID.
  * Supports both conversation agent binding (target_agent_id) and
  * workspace main conversation binding (target_main_jid).
@@ -6439,8 +6607,9 @@ function buildOnPairAttempt(
  */
 function buildResolveEffectiveChatJid(): (
   chatJid: string,
+  messageMeta?: FeishuMessageMeta,
 ) => { effectiveJid: string; agentId: string | null } | null {
-  return (chatJid: string) => {
+  return (chatJid: string, messageMeta) => {
     const group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
     if (!group) return null;
 
@@ -6455,24 +6624,42 @@ function buildResolveEffectiveChatJid(): (
       return { effectiveJid, agentId: group.target_agent_id };
     }
 
+    if (
+      group.binding_mode === 'thread_map' &&
+      group.target_main_jid &&
+      getChannelType(chatJid) === 'feishu' &&
+      messageMeta?.threadId
+    ) {
+      const workspaceJid = resolveWorkspaceJid(group.target_main_jid);
+      if (!workspaceJid) {
+        logger.warn(
+          { chatJid, targetMainJid: group.target_main_jid },
+          'thread_map resolveWorkspaceJid returned null — stale target_main_jid',
+        );
+        return null;
+      }
+      const workspace =
+        registeredGroups[workspaceJid] ?? getRegisteredGroup(workspaceJid);
+      if (!workspace) return null;
+
+      return resolveOrCreateThreadAgent(
+        chatJid,
+        workspaceJid,
+        workspace,
+        group,
+        { ...messageMeta, threadId: messageMeta.threadId },
+      );
+    }
+
     // Main conversation binding
     if (group.target_main_jid) {
-      let effectiveJid = group.target_main_jid;
-      // Legacy fallback: old bindings stored web:${folder} instead of actual JID.
-      // Resolve to the real registered JID so messages are stored correctly.
-      if (
-        !registeredGroups[effectiveJid] &&
-        !getRegisteredGroup(effectiveJid) &&
-        effectiveJid.startsWith('web:')
-      ) {
-        const folder = effectiveJid.slice(4);
-        const jids = getJidsByFolder(folder);
-        for (const j of jids) {
-          if (j.startsWith('web:')) {
-            effectiveJid = j;
-            break;
-          }
-        }
+      const effectiveJid = resolveWorkspaceJid(group.target_main_jid);
+      if (!effectiveJid) {
+        logger.warn(
+          { chatJid, targetMainJid: group.target_main_jid },
+          'resolveWorkspaceJid returned null — target_main_jid is stale or missing, message will not route to workspace',
+        );
+        return null;
       }
       return { effectiveJid, agentId: null };
     }

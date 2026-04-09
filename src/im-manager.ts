@@ -16,7 +16,7 @@ import {
   createWeChatChannel,
   createDingTalkChannel,
 } from './im-channel.js';
-import type { FeishuConnectionConfig } from './feishu.js';
+import { parseFeishuRouteTarget, type FeishuConnectionConfig } from './feishu.js';
 import type { TelegramConnectionConfig } from './telegram.js';
 import type { QQConnectionConfig } from './qq.js';
 import type { WeChatConnectionConfig } from './wechat.js';
@@ -24,6 +24,7 @@ import type { DingTalkConnectionConfig } from './dingtalk.js';
 import type { StreamingCardController } from './feishu-streaming-card.js';
 import { getRegisteredGroup, getJidsByFolder } from './db.js';
 import { logger } from './logger.js';
+import type { FeishuMessageMeta } from './types.js';
 
 export interface UserIMConnection {
   userId: string;
@@ -69,6 +70,7 @@ export interface ConnectFeishuOptions {
   resolveGroupFolder?: (chatJid: string) => string | undefined;
   resolveEffectiveChatJid?: (
     chatJid: string,
+    messageMeta?: FeishuMessageMeta,
   ) => { effectiveJid: string; agentId: string | null } | null;
   onAgentMessage?: (baseChatJid: string, agentId: string) => void;
   onBotAddedToGroup?: (chatJid: string, chatName: string) => void;
@@ -267,8 +269,9 @@ class IMConnectionManager {
     jid: string,
     channelType: string,
   ): IMChannel | undefined {
+    const baseJid = parseFeishuRouteTarget(jid).chatId;
     // Direct lookup via group ownership
-    const group = getRegisteredGroup(jid);
+    const group = getRegisteredGroup(baseJid);
     if (group?.created_by) {
       const conn = this.connections.get(group.created_by);
       const ch = conn?.channels.get(channelType);
