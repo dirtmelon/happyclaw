@@ -57,13 +57,14 @@ interface TokenInfo {
 
 // ─── Token Management ────────────────────────────────────────
 
-let sharedToken: TokenInfo | null = null;
+const tokenCache = new Map<string, TokenInfo>();
 
 async function getAccessToken(
   config: DingTalkStreamingCardConfig,
 ): Promise<string> {
-  if (sharedToken && Date.now() < sharedToken.expiresAt - 300_000) {
-    return sharedToken.token;
+  const cached = tokenCache.get(config.clientId);
+  if (cached && Date.now() < cached.expiresAt - 300_000) {
+    return cached.token;
   }
 
   return new Promise<string>((resolve, reject) => {
@@ -88,10 +89,10 @@ async function getAccessToken(
               return;
             }
             const expiresIn = Number(data.expires_in) || 7200;
-            sharedToken = {
+            tokenCache.set(config.clientId, {
               token: data.access_token,
               expiresAt: Date.now() + expiresIn * 1000,
-            };
+            });
             resolve(data.access_token);
           } catch (err) {
             reject(err);
@@ -295,6 +296,7 @@ export class DingTalkStreamingCardController {
       name: string;
       status: 'running' | 'complete' | 'error';
       startTime: number;
+      summary?: string;
     }
   >();
   private recentEvents: Array<string> = [];
@@ -521,7 +523,7 @@ export class DingTalkStreamingCardController {
   updateToolSummary(toolId: string, summary: string): void {
     const tc = this.tools.get(toolId);
     if (tc) {
-      (tc as any).summary = summary;
+      tc.summary = summary;
       if (this.state === 'streaming') this.scheduleAuxFlush();
     }
   }
@@ -584,7 +586,7 @@ export class DingTalkStreamingCardController {
         name: tc.name,
         status: tc.status,
         elapsed,
-        summary: (tc as any).summary,
+        summary: tc.summary,
       });
     }
     if (display.length > 0) {

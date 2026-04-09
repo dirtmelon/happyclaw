@@ -2426,10 +2426,18 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         unregisterStreamingSession(streamingSessionJid);
       }
       streamingSessionJid = newStreamingJid;
-      streamingSession = await imManager.createStreamingSession(
-        streamingSessionJid,
-        makeOnCardCreated(streamingSessionJid),
-      );
+      try {
+        streamingSession = await imManager.createStreamingSession(
+          streamingSessionJid,
+          makeOnCardCreated(streamingSessionJid),
+        );
+      } catch (err: any) {
+        logger.error(
+          { err: err.message, streamingSessionJid },
+          'Failed to create streaming session in route updater',
+        );
+        streamingSession = undefined;
+      }
       streamingAccumulatedText = '';
       streamingAccumulatedThinking = '';
       if (streamingSession) {
