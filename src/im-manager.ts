@@ -21,8 +21,9 @@ import type { TelegramConnectionConfig } from './telegram.js';
 import type { QQConnectionConfig } from './qq.js';
 import type { WeChatConnectionConfig } from './wechat.js';
 import type { DingTalkConnectionConfig } from './dingtalk.js';
-import type { StreamingCardController } from './feishu-streaming-card.js';
+import type { StreamingSession } from './im-channel.js';
 import { getRegisteredGroup, getJidsByFolder } from './db.js';
+import { getUserDingTalkConfig } from './runtime-config.js';
 import { logger } from './logger.js';
 import type { FeishuMessageMeta } from './types.js';
 
@@ -243,15 +244,28 @@ class IMConnectionManager {
   }
 
   /**
-   * Create a streaming card session for an IM chat (Feishu only).
-   * Returns undefined for non-Feishu channels or if not supported.
+   * Create a streaming card session for an IM chat (Feishu or DingTalk).
+   * Returns undefined for unsupported channels.
    */
-  createStreamingSession(
+  async createStreamingSession(
     jid: string,
     onCardCreated?: (messageId: string) => void,
-  ): StreamingCardController | undefined {
+  ): Promise<StreamingSession | undefined> {
     const channelType = getChannelType(jid);
-    if (channelType !== 'feishu') return undefined;
+    if (channelType !== 'feishu' && channelType !== 'dingtalk')
+      return undefined;
+
+    // Check DingTalk streaming mode: if text mode, skip streaming session creation
+    if (channelType === 'dingtalk') {
+      const group = getRegisteredGroup(jid);
+      if (group?.created_by) {
+        const dtConfig = getUserDingTalkConfig(group.created_by);
+        if (dtConfig && dtConfig.streamingMode === 'text') {
+          logger.debug({ jid }, 'DingTalk streaming disabled (text mode)');
+          return undefined;
+        }
+      }
+    }
 
     const chatId = extractChatId(jid);
     const channel = this.findChannelForJid(jid, channelType);

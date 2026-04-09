@@ -35,7 +35,13 @@ import {
   StreamingCardController,
   type StreamingCardOptions,
 } from './feishu-streaming-card.js';
+import type { DingTalkStreamingCardController } from './dingtalk-streaming-card.js';
 import { CHANNEL_PREFIXES } from './channel-prefixes.js';
+
+/** Union type for any streaming card controller (Feishu or DingTalk) */
+export type StreamingSession =
+  | StreamingCardController
+  | DingTalkStreamingCardController;
 
 // ─── Unified Interface ──────────────────────────────────────────
 
@@ -96,11 +102,11 @@ export interface IMChannel {
   clearAckReaction?(chatId: string): void;
   isConnected(): boolean;
   syncGroups?(): Promise<void>;
-  /** Create a streaming card session for real-time card updates (Feishu only) */
+  /** Create a streaming card session for real-time card updates (Feishu or DingTalk) */
   createStreamingSession?(
     chatId: string,
     onCardCreated?: (messageId: string) => void,
-  ): StreamingCardController | undefined;
+  ): Promise<StreamingSession | undefined>;
   getChatInfo?(chatId: string): Promise<{
     avatar?: string;
     name?: string;
@@ -251,10 +257,10 @@ export function createFeishuChannel(config: FeishuConnectionConfig): IMChannel {
       return inner.getChatInfo(chatId);
     },
 
-    createStreamingSession(
+    async createStreamingSession(
       chatId: string,
       onCardCreated?: (messageId: string) => void,
-    ): StreamingCardController | undefined {
+    ): Promise<StreamingSession | undefined> {
       if (!inner) return undefined;
       const larkClient = inner.getLarkClient();
       if (!larkClient) return undefined;
@@ -622,6 +628,14 @@ export function createDingTalkChannel(
 
     isConnected(): boolean {
       return inner?.isConnected() ?? false;
+    },
+
+    async createStreamingSession(
+      chatId: string,
+      onCardCreated?: (messageId: string) => void,
+    ): Promise<StreamingSession | undefined> {
+      if (!inner?.createStreamingSession) return undefined;
+      return inner.createStreamingSession(chatId, onCardCreated);
     },
   };
 

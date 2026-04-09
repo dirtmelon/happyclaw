@@ -74,7 +74,12 @@ import {
   saveUserDingTalkConfig,
   updateAllSessionCredentials,
 } from '../runtime-config.js';
-import type { ClaudeOAuthCredentials, CachedOAuthUsage, OAuthUsageResponse, OAuthUsageBucket } from '../runtime-config.js';
+import type {
+  ClaudeOAuthCredentials,
+  CachedOAuthUsage,
+  OAuthUsageResponse,
+  OAuthUsageBucket,
+} from '../runtime-config.js';
 import { parseOAuthUsageBucket } from '../runtime-config.js';
 import type { AuthUser, RegisteredGroup } from '../types.js';
 import { hasPermission } from '../permissions.js';
@@ -246,7 +251,10 @@ async function fetchOAuthUsage(providerId: string): Promise<CachedOAuthUsage> {
       if (!resp.ok) {
         // Return stale cache if available, otherwise throw
         if (cached) {
-          const stale: CachedOAuthUsage = { ...cached, error: `HTTP ${resp.status}` };
+          const stale: CachedOAuthUsage = {
+            ...cached,
+            error: `HTTP ${resp.status}`,
+          };
           usageCache.set(providerId, stale);
           return stale;
         }
@@ -1890,6 +1898,7 @@ configRoutes.get('/user-im/dingtalk', authMiddleware, (c) => {
         hasClientSecret: false,
         clientSecretMasked: null,
         enabled: false,
+        streamingMode: 'card',
         updatedAt: null,
         connected,
       });
@@ -1903,6 +1912,7 @@ configRoutes.get('/user-im/dingtalk', authMiddleware, (c) => {
           config.clientSecret.slice(-4)
         : null,
       enabled: config.enabled ?? false,
+      streamingMode: config.streamingMode ?? 'card',
       updatedAt: config.updatedAt,
       connected,
     });
@@ -1943,6 +1953,7 @@ configRoutes.put('/user-im/dingtalk', authMiddleware, async (c) => {
     clientId: current?.clientId || '',
     clientSecret: current?.clientSecret || '',
     enabled: current?.enabled ?? true,
+    streamingMode: current?.streamingMode ?? 'card',
   };
 
   if (typeof validation.data.clientId === 'string') {
@@ -1958,6 +1969,9 @@ configRoutes.put('/user-im/dingtalk', authMiddleware, async (c) => {
     next.enabled = validation.data.enabled;
   } else if (!current && (next.clientId || next.clientSecret)) {
     next.enabled = true;
+  }
+  if (typeof validation.data.streamingMode === 'string') {
+    next.streamingMode = validation.data.streamingMode;
   }
 
   try {
@@ -1980,6 +1994,7 @@ configRoutes.put('/user-im/dingtalk', authMiddleware, async (c) => {
         ? saved.clientSecret.slice(0, 4) + '***' + saved.clientSecret.slice(-4)
         : null,
       enabled: saved.enabled ?? false,
+      streamingMode: saved.streamingMode ?? 'card',
       updatedAt: saved.updatedAt,
       connected,
     });
