@@ -220,7 +220,7 @@ interface ChatState {
   loadAvailableImGroups: (jid: string) => Promise<AvailableImGroup[]>;
   bindImGroup: (jid: string, agentId: string, imJid: string, force?: boolean) => Promise<boolean>;
   unbindImGroup: (jid: string, agentId: string, imJid: string) => Promise<boolean>;
-  bindMainImGroup: (jid: string, imJid: string, force?: boolean, activationMode?: string) => Promise<boolean>;
+  bindMainImGroup: (jid: string, imJid: string, force?: boolean, activationMode?: string, ownerImId?: string) => Promise<boolean>;
   unbindMainImGroup: (jid: string, imJid: string) => Promise<boolean>;
   // Draft persistence across route navigation
   drafts: Record<string, string>;
@@ -1124,6 +1124,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       });
 
       await get().loadGroups();
+      await get().loadAgents(jid);
       // 重建工作区后刷新文件列表（工作目录已被清空）
       useFileStore.getState().loadFiles(jid);
       return true;
@@ -1805,13 +1806,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
       const idx = existing.findIndex((a) => a.id === agentId);
       const resolvedKind = kind || (idx >= 0 ? existing[idx].kind : 'task');
+      const previous = idx >= 0 ? existing[idx] : undefined;
       const agentInfo: AgentInfo = {
+        ...previous,
         id: agentId,
         name,
         prompt,
         status,
         kind: resolvedKind,
-        created_at: idx >= 0 ? existing[idx].created_at : new Date().toISOString(),
+        created_at: previous?.created_at || new Date().toISOString(),
         completed_at: (status === 'completed' || status === 'error') ? new Date().toISOString() : undefined,
         result_summary: resultSummary,
       };
@@ -2186,7 +2189,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  bindMainImGroup: async (jid, imJid, force, activationMode) => {
+  bindMainImGroup: async (jid, imJid, force, activationMode, ownerImId) => {
     try {
       await api.put(
         `/api/groups/${encodeURIComponent(jid)}/im-binding`,
@@ -2194,8 +2197,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
           im_jid: imJid,
           ...(force ? { force: true } : {}),
           ...(activationMode ? { activation_mode: activationMode } : {}),
+          ...(ownerImId ? { owner_im_id: ownerImId } : {}),
         },
       );
+      await get().loadGroups();
       return true;
     } catch {
       return false;
@@ -2207,6 +2212,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       await api.delete(
         `/api/groups/${encodeURIComponent(jid)}/im-binding/${encodeURIComponent(imJid)}`,
       );
+      await get().loadGroups();
       return true;
     } catch {
       return false;

@@ -1670,7 +1670,9 @@ export function saveFeishuProviderConfig(
     appId: normalized.appId,
     enabled: normalized.enabled,
     updatedAt: normalized.updatedAt || new Date().toISOString(),
-    secret: encryptChannelSecret<FeishuSecretPayload>({ appSecret: normalized.appSecret }),
+    secret: encryptChannelSecret<FeishuSecretPayload>({
+      appSecret: normalized.appSecret,
+    }),
   };
 
   fs.mkdirSync(CLAUDE_CONFIG_DIR, { recursive: true });
@@ -1765,7 +1767,9 @@ export function saveTelegramProviderConfig(
     proxyUrl: normalized.proxyUrl,
     enabled: normalized.enabled,
     updatedAt: normalized.updatedAt || new Date().toISOString(),
-    secret: encryptChannelSecret<TelegramSecretPayload>({ botToken: normalized.botToken }),
+    secret: encryptChannelSecret<TelegramSecretPayload>({
+      botToken: normalized.botToken,
+    }),
   };
 
   fs.mkdirSync(CLAUDE_CONFIG_DIR, { recursive: true });
@@ -2738,7 +2742,9 @@ export function writeCredentialsFile(
   // Claude CLI requires scopes to recognize the token as valid.
   // Fall back to a sensible default when the stored credentials lack scopes
   // (e.g. tokens imported before scopes were captured).
-  const scopes = creds.scopes?.length ? creds.scopes : DEFAULT_CREDENTIAL_SCOPES;
+  const scopes = creds.scopes?.length
+    ? creds.scopes
+    : DEFAULT_CREDENTIAL_SCOPES;
 
   const claudeAiOauth: {
     accessToken: string;
@@ -3025,6 +3031,7 @@ export interface UserDingTalkConfig {
   clientId: string;
   clientSecret: string;
   enabled?: boolean;
+  streamingMode?: 'card' | 'text';
   updatedAt: string | null;
 }
 
@@ -3032,6 +3039,7 @@ interface StoredDingTalkProviderConfigV1 {
   version: 1;
   clientId: string;
   enabled?: boolean;
+  streamingMode?: 'card' | 'text';
   updatedAt: string;
   secret: EncryptedSecrets;
 }
@@ -3097,7 +3105,9 @@ export function saveUserFeishuConfig(
     appId: normalized.appId,
     enabled: normalized.enabled,
     updatedAt: normalized.updatedAt || new Date().toISOString(),
-    secret: encryptChannelSecret<FeishuSecretPayload>({ appSecret: normalized.appSecret }),
+    secret: encryptChannelSecret<FeishuSecretPayload>({
+      appSecret: normalized.appSecret,
+    }),
   };
 
   const dir = userImDir(userId);
@@ -3152,7 +3162,9 @@ export function saveUserTelegramConfig(
     proxyUrl: normalizedProxyUrl || undefined,
     enabled: normalized.enabled,
     updatedAt: normalized.updatedAt || new Date().toISOString(),
-    secret: encryptChannelSecret<TelegramSecretPayload>({ botToken: normalized.botToken }),
+    secret: encryptChannelSecret<TelegramSecretPayload>({
+      botToken: normalized.botToken,
+    }),
   };
 
   const dir = userImDir(userId);
@@ -3204,7 +3216,9 @@ export function saveUserQQConfig(
     appId: normalized.appId,
     enabled: normalized.enabled,
     updatedAt: normalized.updatedAt || new Date().toISOString(),
-    secret: encryptChannelSecret<QQSecretPayload>({ appSecret: normalized.appSecret }),
+    secret: encryptChannelSecret<QQSecretPayload>({
+      appSecret: normalized.appSecret,
+    }),
   };
 
   const dir = userImDir(userId);
@@ -3295,7 +3309,9 @@ export function saveUserWeChatConfig(
     bypassProxy: normalized.bypassProxy,
     enabled: normalized.enabled,
     updatedAt: normalized.updatedAt || new Date().toISOString(),
-    secret: encryptChannelSecret<WeChatSecretPayload>({ botToken: normalized.botToken }),
+    secret: encryptChannelSecret<WeChatSecretPayload>({
+      botToken: normalized.botToken,
+    }),
   };
 
   const dir = userImDir(userId);
@@ -3325,6 +3341,7 @@ export function getUserDingTalkConfig(
       clientId: ((stored.clientId as string) ?? '').trim(),
       clientSecret: secret.clientSecret,
       enabled: stored.enabled,
+      streamingMode: stored.streamingMode === 'text' ? 'text' : 'card',
       updatedAt: stored.updatedAt || null,
     };
   } catch (err) {
@@ -3341,6 +3358,7 @@ export function saveUserDingTalkConfig(
     clientId: ((next.clientId as string) ?? '').trim(),
     clientSecret: normalizeSecret(next.clientSecret, 'clientSecret'),
     enabled: next.enabled,
+    streamingMode: next.streamingMode === 'text' ? 'text' : 'card',
     updatedAt: new Date().toISOString(),
   };
 
@@ -3348,8 +3366,11 @@ export function saveUserDingTalkConfig(
     version: 1,
     clientId: normalized.clientId,
     enabled: normalized.enabled,
+    streamingMode: normalized.streamingMode === 'text' ? 'text' : 'card',
     updatedAt: normalized.updatedAt || new Date().toISOString(),
-    secret: encryptChannelSecret<DingTalkSecretPayload>({ clientSecret: normalized.clientSecret }),
+    secret: encryptChannelSecret<DingTalkSecretPayload>({
+      clientSecret: normalized.clientSecret,
+    }),
   };
 
   const dir = userImDir(userId);
@@ -3675,10 +3696,9 @@ export interface OAuthUsageBucket {
  * 运行时类型守卫，验证 API 响应结构
  */
 export function parseOAuthUsageBucket(v: unknown): OAuthUsageBucket | null {
-  if (!v || typeof v !== "object") return null;
+  if (!v || typeof v !== 'object') return null;
   const obj = v as Record<string, unknown>;
-  if (typeof obj.utilization !== "number" || typeof obj.resets_at !== "string")
+  if (typeof obj.utilization !== 'number' || typeof obj.resets_at !== 'string')
     return null;
   return { utilization: obj.utilization, resets_at: obj.resets_at };
 }
-

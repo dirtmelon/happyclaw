@@ -56,7 +56,7 @@ export interface DingTalkConnectOpts {
     chatName: string,
     code: string,
   ) => Promise<boolean>;
-  onCommand?: (chatJid: string, command: string) => Promise<string | null>;
+  onCommand?: (chatJid: string, command: string, senderImId?: string) => Promise<string | null>;
   resolveGroupFolder?: (jid: string) => string | undefined;
   resolveEffectiveChatJid?: (
     chatJid: string,
@@ -64,7 +64,8 @@ export interface DingTalkConnectOpts {
   onAgentMessage?: (baseChatJid: string, agentId: string) => void;
   onBotAddedToGroup?: (chatJid: string, chatName: string) => void;
   onBotRemovedFromGroup?: (chatJid: string) => void;
-  shouldProcessGroupMessage?: (chatJid: string) => boolean;
+  shouldProcessGroupMessage?: (chatJid: string, senderImId?: string) => boolean;
+  isGroupOwnerMessage?: (chatJid: string, senderImId?: string) => boolean;
 }
 
 export interface DingTalkConnection {
@@ -84,8 +85,17 @@ export interface DingTalkConnection {
   ): Promise<void>;
   sendFile(chatId: string, filePath: string, fileName: string): Promise<void>;
   sendReaction(chatId: string, isTyping: boolean): Promise<void>;
+  /** Clear the ack reaction for a chat (e.g. when streaming card handled the reply) */
+  clearAckReaction(chatId: string): void;
   isConnected(): boolean;
   getLastMessageId?(chatId: string): string | undefined;
+  createStreamingSession?(
+    chatId: string,
+    onCardCreated?: (messageId: string) => void,
+  ): Promise<
+    | import('./dingtalk-streaming-card.js').DingTalkStreamingCardController
+    | undefined
+  >;
 }
 
 interface DingTalkAccessToken {
@@ -202,7 +212,6 @@ export function createDingTalkConnection(
   let client: DWClient | null = null;
   let stopping = false;
   let readyFired = false;
-  let reconnectCheckInterval: NodeJS.Timeout | null = null;
 
   // Token state for REST API
   let tokenInfo: DingTalkAccessToken | null = null;
@@ -225,6 +234,12 @@ export function createDingTalkConnection(
 
   // Sender staff ID per chat (enterprise staff ID for batchSend API)
   const lastSenderStaffIds = new Map<string, string>();
+
+  // Ack reaction per chat (emoji reaction on user's message to confirm receipt)
+  const ackReactionByChat = new Map<
+    string,
+    { msgId: string; conversationId: string }
+  >();
 
   function isDuplicate(msgId: string): boolean {
     const now = Date.now();
@@ -359,6 +374,106 @@ export function createDingTalkConnection(
       if (bodyStr) req.write(bodyStr);
       req.end();
     });
+  }
+
+  // ─── Ack Reaction (Emoji on user's message) ───────────────
+
+  const ACK_REACTION_ATTACH_DELAYS = [0, 400, 1200];
+
+  /** Track in-flight attach promises so clearAckReaction can await them. */
+  const pendingAttaches = new Map<string, Promise<void>>();
+
+  /**
+   * Attach "🤔思考中" emoji reaction to user's message as ack confirmation.
+   * Retries up to 3 times with backoff for transient failures.
+   * @param chatId raw JID (e.g. "dingtalk:c2c:xxx") — will be stripped to
+   *   bare chatId for storage, matching the key used by recallAckReaction.
+   */
+  async function attachAckReaction(
+    msgId: string,
+    conversationId: string,
+    rawJid: string,
+  ): Promise<void> {
+    // Strip the "dingtalk:" prefix so the Map key matches what
+    // recallAckReaction receives (which comes through extractChatId).
+    const chatId = rawJid.startsWith('dingtalk:')
+      ? rawJid.slice('dingtalk:'.length)
+      : rawJid;
+    const body = {
+      robotCode: config.clientId,
+      openMsgId: msgId,
+      openConversationId: conversationId,
+      emotionType: 2,
+      emotionName: '🤔思考中',
+      textEmotion: {
+        emotionId: '2659900',
+        emotionName: '🤔思考中',
+        text: '🤔思考中',
+        backgroundId: 'im_bg_1',
+      },
+    };
+
+    for (let i = 0; i < ACK_REACTION_ATTACH_DELAYS.length; i++) {
+      if (ACK_REACTION_ATTACH_DELAYS[i] > 0) {
+        await new Promise((r) => setTimeout(r, ACK_REACTION_ATTACH_DELAYS[i]));
+      }
+      try {
+        await apiRequest('POST', '/v1.0/robot/emotion/reply', body);
+        // Recall previous reaction before overwriting (e.g. second message
+        // arrives before the first is replied — prevents orphaned emoji)
+        const existing = ackReactionByChat.get(chatId);
+        if (existing) {
+          recallAckReaction(chatId).catch(() => {});
+        }
+        ackReactionByChat.set(chatId, { msgId, conversationId });
+        logger.debug({ msgId, chatId }, 'DingTalk ack reaction attached');
+        return;
+      } catch (err: any) {
+        // apiRequest throws plain Error objects (no .response property),
+        // so parse the status code from the error message string.
+        const match = err?.message?.match(/\((\d{3})\)/);
+        const status = match ? parseInt(match[1], 10) : 0;
+        const isRetryable = status === 0 || (status >= 500 && status < 600);
+        if (!isRetryable || i === ACK_REACTION_ATTACH_DELAYS.length - 1) {
+          logger.debug(
+            { err: err.message, msgId, chatId },
+            'DingTalk ack reaction attach failed',
+          );
+          return;
+        }
+      }
+    }
+  }
+
+  /**
+   * Recall the ack reaction emoji from user's message.
+   * Silent on failure — the emoji will naturally expire.
+   */
+  async function recallAckReaction(chatId: string): Promise<void> {
+    const stored = ackReactionByChat.get(chatId);
+    if (!stored) return;
+    ackReactionByChat.delete(chatId);
+    try {
+      await apiRequest('POST', '/v1.0/robot/emotion/recall', {
+        robotCode: config.clientId,
+        openMsgId: stored.msgId,
+        openConversationId: stored.conversationId,
+        emotionType: 2,
+        emotionName: '🤔思考中',
+        textEmotion: {
+          emotionId: '2659900',
+          emotionName: '🤔思考中',
+          text: '🤔思考中',
+          backgroundId: 'im_bg_1',
+        },
+      });
+      logger.debug({ chatId }, 'DingTalk ack reaction recalled');
+    } catch (err: any) {
+      logger.debug(
+        { err: err.message, chatId },
+        'DingTalk ack reaction recall failed (non-critical)',
+      );
+    }
   }
 
   // ─── Message Sending ──────────────────────────────────────
@@ -517,7 +632,13 @@ export function createDingTalkConnection(
     const token = await getAccessToken();
     const robotCode = config.clientId;
     const msgParam = JSON.stringify({ content });
-    await batchSendToUser([senderStaffId], robotCode, token, 'sampleText', msgParam);
+    await batchSendToUser(
+      [senderStaffId],
+      robotCode,
+      token,
+      'sampleText',
+      msgParam,
+    );
   }
 
   /**
@@ -1017,7 +1138,13 @@ export function createDingTalkConnection(
       const token = await getAccessToken();
       // sampleImageMsg uses photoURL field (not mediaId) - DingTalk API quirk
       const msgParam = JSON.stringify({ photoURL: mediaId });
-      await batchSendToUser([userId], robotCode, token, 'sampleImageMsg', msgParam);
+      await batchSendToUser(
+        [userId],
+        robotCode,
+        token,
+        'sampleImageMsg',
+        msgParam,
+      );
       logger.info({ userId, mediaId, fileName }, 'DingTalk image message sent');
     } catch (err) {
       logger.error(
@@ -1381,14 +1508,32 @@ export function createDingTalkConnection(
       }
 
       // ── Group mention check ──
+      // 钉钉 Stream 只收到 @bot 消息，所以 shouldProcessGroupMessage（"bot 未被
+      // @mention 时是否放行"）语义上对钉钉不完全适用。但 owner_mentioned 模式下
+      // 它返回 false，会在 Gate 1 误丢所有群消息，导致 isGroupOwnerMessage 永远
+      // 不会执行。修复：当 shouldProcessGroupMessage 返回 false 且
+      // isGroupOwnerMessage 回调存在时，不立即丢弃，让 Gate 2 做 sender 过滤。
       if (
         isGroup &&
         opts.shouldProcessGroupMessage &&
-        !opts.shouldProcessGroupMessage(jid)
+        !opts.shouldProcessGroupMessage(jid, data.senderId) &&
+        !opts.isGroupOwnerMessage
       ) {
         logger.debug(
           { jid },
           'DingTalk group message dropped (mention required)',
+        );
+        return;
+      }
+      // owner_mentioned 模式：即使被 @mention，非 owner 的消息也丢弃
+      if (
+        isGroup &&
+        opts.isGroupOwnerMessage &&
+        !opts.isGroupOwnerMessage(jid, data.senderId)
+      ) {
+        logger.debug(
+          { jid, senderId: data.senderId },
+          'DingTalk group message dropped (owner_mentioned mode)',
         );
         return;
       }
@@ -1405,11 +1550,15 @@ export function createDingTalkConnection(
           slashMatch[1] + (slashMatch[2] ? ' ' + slashMatch[2] : '')
         ).trim();
         try {
-          const reply = await opts.onCommand(jid, cmdBody);
+          const reply = await opts.onCommand(jid, cmdBody, data.senderId);
           if (reply) {
             const plainText = markdownToPlainText(reply);
             if (data.sessionWebhook) {
-              await sendViaSessionWebhook(data.sessionWebhook, plainText, isGroup);
+              await sendViaSessionWebhook(
+                data.sessionWebhook,
+                plainText,
+                isGroup,
+              );
             }
             return;
           }
@@ -1455,6 +1604,19 @@ export function createDingTalkConnection(
         },
         agentRouting?.agentId ?? undefined,
       );
+
+      // ── Ack Reaction：确认已收到消息 ──
+      const chatId = jid.startsWith('dingtalk:')
+        ? jid.slice('dingtalk:'.length)
+        : jid;
+      const attachPromise = attachAckReaction(
+        msgId,
+        conversationId,
+        jid,
+      ).catch(() => {});
+      pendingAttaches.set(chatId, attachPromise);
+      attachPromise.finally(() => pendingAttaches.delete(chatId));
+
       notifyNewImMessage();
 
       if (agentRouting?.agentId) {
@@ -1495,7 +1657,9 @@ export function createDingTalkConnection(
         const originalProxy = axios.defaults?.proxy;
         if (axios.defaults) {
           axios.defaults.proxy = false;
-          logger.debug('Temporarily disabled axios global proxy for dingtalk-stream SDK');
+          logger.debug(
+            'Temporarily disabled axios global proxy for dingtalk-stream SDK',
+          );
         }
 
         // Create DWClient
@@ -1503,6 +1667,7 @@ export function createDingTalkConnection(
           clientId: config.clientId,
           clientSecret: config.clientSecret,
           debug: false,
+          keepAlive: true,
         });
 
         // Restore original axios proxy setting after DWClient creation
@@ -1541,36 +1706,12 @@ export function createDingTalkConnection(
           'DingTalk Stream connected',
         );
 
-        // Monitor for subscription recovery: the SDK reconnects automatically after
-        // network interruptions, but the server may drop our subscription registration.
-        // Detect "connected but not subscribed" state and force a full re-register.
-        let reconnectGuard = false;
-        const startReconnectMonitor = (): void => {
-          const check = async (): Promise<void> => {
-            if (stopping || reconnectGuard) return;
-            const sdk = client as any;
-            if (sdk?.connected && !sdk?.registered) {
-              reconnectGuard = true;
-              logger.warn(
-                'DingTalk reconnected but not registered, forcing re-register',
-              );
-              try {
-                const cur = client;
-                if (cur) {
-                  cur.disconnect();
-                  await cur.connect();
-                }
-              } catch {
-                // ignore — SDK will retry on next check
-              } finally {
-                reconnectGuard = false;
-              }
-            }
-          };
-          reconnectCheckInterval = setInterval(check, 15_000);
-          void check(); // immediate first check
-        };
-        startReconnectMonitor();
+        // The SDK handles reconnection internally via autoReconnect + scheduleReconnect()
+        // with exponential backoff. The previous reconnect monitor checked sdk.registered,
+        // but this property is never set to true by the current DingTalk Stream protocol
+        // (the REGISTERED system message appears to not be sent). This caused a destructive
+        // disconnect-reconnect loop every 15 seconds, killing working connections.
+        // Removed the monitor — the SDK is self-healing.
 
         readyFired = true;
         opts.onReady?.();
@@ -1583,10 +1724,6 @@ export function createDingTalkConnection(
 
     async disconnect(): Promise<void> {
       stopping = true;
-      if (reconnectCheckInterval) {
-        clearInterval(reconnectCheckInterval);
-        reconnectCheckInterval = null;
-      }
 
       if (client) {
         try {
@@ -1910,12 +2047,62 @@ export function createDingTalkConnection(
       // DingTalk doesn't support typing indicators via Stream
     },
 
+    clearAckReaction(chatId: string): void {
+      const pending = pendingAttaches.get(chatId);
+      if (pending) {
+        pending
+          .then(() => recallAckReaction(chatId).catch(() => {}))
+          .catch(() => {});
+      } else {
+        recallAckReaction(chatId).catch(() => {});
+      }
+    },
+
     isConnected(): boolean {
       return client !== null && !stopping;
     },
 
     getLastMessageId(chatId: string): string | undefined {
       return lastMessageIds.get(chatId);
+    },
+
+    async createStreamingSession(
+      chatId: string,
+      onCardCreated?: (messageId: string) => void,
+    ): Promise<
+      | import('./dingtalk-streaming-card.js').DingTalkStreamingCardController
+      | undefined
+    > {
+      const parsed = parseDingTalkChatId(chatId);
+      if (!parsed) return undefined;
+
+      const { DingTalkStreamingCardController } =
+        await import('./dingtalk-streaming-card.js');
+
+      // For C2C: use senderStaffId (enterprise staff ID) instead of encrypted senderId.
+      // DingTalk Stream SDK returns senderId in encrypted format ($:LWCP_v1:$xxx)
+      // which the AI Card deliver API rejects with "spaceId is illegal".
+      const jidKey =
+        parsed.type === 'c2c'
+          ? `dingtalk:c2c:${parsed.conversationId}`
+          : `dingtalk:group:${parsed.conversationId}`;
+      const target =
+        parsed.type === 'c2c'
+          ? {
+              type: 'user' as const,
+              userId: lastSenderStaffIds.get(jidKey) ?? parsed.conversationId,
+            }
+          : {
+              type: 'group' as const,
+              openConversationId: parsed.conversationId,
+            };
+
+      return new DingTalkStreamingCardController(config, target, {
+        onCardCreated,
+        fallbackSend: async (text: string) => {
+          await connection.sendMessage(chatId, text);
+        },
+      });
     },
   };
 

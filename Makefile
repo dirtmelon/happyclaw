@@ -128,7 +128,11 @@ typecheck-agent-runner:
 	cd container/agent-runner && $(RUN) tsc --noEmit
 
 test: ## 运行单元测试
+ifeq ($(HAS_BUN),1)
 	bun test
+else
+	$(RUN) vitest run
+endif
 
 format: ## 格式化代码
 	$(PKG) run format

@@ -16,14 +16,16 @@ import {
   createWeChatChannel,
   createDingTalkChannel,
 } from './im-channel.js';
-import type { FeishuConnectionConfig } from './feishu.js';
+import { parseFeishuRouteTarget, type FeishuConnectionConfig } from './feishu.js';
 import type { TelegramConnectionConfig } from './telegram.js';
 import type { QQConnectionConfig } from './qq.js';
 import type { WeChatConnectionConfig } from './wechat.js';
 import type { DingTalkConnectionConfig } from './dingtalk.js';
-import type { StreamingCardController } from './feishu-streaming-card.js';
+import type { StreamingSession } from './im-channel.js';
 import { getRegisteredGroup, getJidsByFolder } from './db.js';
+import { getUserDingTalkConfig } from './runtime-config.js';
 import { logger } from './logger.js';
+import type { FeishuMessageMeta } from './types.js';
 
 export interface UserIMConnection {
   userId: string;
@@ -69,11 +71,13 @@ export interface ConnectFeishuOptions {
   resolveGroupFolder?: (chatJid: string) => string | undefined;
   resolveEffectiveChatJid?: (
     chatJid: string,
+    messageMeta?: FeishuMessageMeta,
   ) => { effectiveJid: string; agentId: string | null } | null;
   onAgentMessage?: (baseChatJid: string, agentId: string) => void;
   onBotAddedToGroup?: (chatJid: string, chatName: string) => void;
   onBotRemovedFromGroup?: (chatJid: string) => void;
-  shouldProcessGroupMessage?: (chatJid: string) => boolean;
+  shouldProcessGroupMessage?: (chatJid: string, senderImId?: string) => boolean;
+  isGroupOwnerMessage?: (chatJid: string, senderImId?: string) => boolean;
   onCardInterrupt?: (chatJid: string) => void;
 }
 
@@ -240,15 +244,28 @@ class IMConnectionManager {
   }
 
   /**
-   * Create a streaming card session for an IM chat (Feishu only).
-   * Returns undefined for non-Feishu channels or if not supported.
+   * Create a streaming card session for an IM chat (Feishu or DingTalk).
+   * Returns undefined for unsupported channels.
    */
-  createStreamingSession(
+  async createStreamingSession(
     jid: string,
     onCardCreated?: (messageId: string) => void,
-  ): StreamingCardController | undefined {
+  ): Promise<StreamingSession | undefined> {
     const channelType = getChannelType(jid);
-    if (channelType !== 'feishu') return undefined;
+    if (channelType !== 'feishu' && channelType !== 'dingtalk')
+      return undefined;
+
+    // Check DingTalk streaming mode: if text mode, skip streaming session creation
+    if (channelType === 'dingtalk') {
+      const group = getRegisteredGroup(jid);
+      if (group?.created_by) {
+        const dtConfig = getUserDingTalkConfig(group.created_by);
+        if (dtConfig && dtConfig.streamingMode === 'text') {
+          logger.debug({ jid }, 'DingTalk streaming disabled (text mode)');
+          return undefined;
+        }
+      }
+    }
 
     const chatId = extractChatId(jid);
     const channel = this.findChannelForJid(jid, channelType);
@@ -266,8 +283,9 @@ class IMConnectionManager {
     jid: string,
     channelType: string,
   ): IMChannel | undefined {
+    const baseJid = parseFeishuRouteTarget(jid).chatId;
     // Direct lookup via group ownership
-    const group = getRegisteredGroup(jid);
+    const group = getRegisteredGroup(baseJid);
     if (group?.created_by) {
       const conn = this.connections.get(group.created_by);
       const ch = conn?.channels.get(channelType);
@@ -355,6 +373,7 @@ class IMConnectionManager {
       onBotAddedToGroup: options?.onBotAddedToGroup,
       onBotRemovedFromGroup: options?.onBotRemovedFromGroup,
       shouldProcessGroupMessage: options?.shouldProcessGroupMessage,
+      isGroupOwnerMessage: options?.isGroupOwnerMessage,
       onCardInterrupt: options?.onCardInterrupt,
     });
   }
@@ -533,7 +552,8 @@ class IMConnectionManager {
       onAgentMessage?: (baseChatJid: string, agentId: string) => void;
       onBotAddedToGroup?: (chatJid: string, chatName: string) => void;
       onBotRemovedFromGroup?: (chatJid: string) => void;
-      shouldProcessGroupMessage?: (chatJid: string) => boolean;
+      shouldProcessGroupMessage?: (chatJid: string, senderImId?: string) => boolean;
+      isGroupOwnerMessage?: (chatJid: string, senderImId?: string) => boolean;
     },
   ): Promise<boolean> {
     if (!config.clientId || !config.clientSecret) {
@@ -559,6 +579,7 @@ class IMConnectionManager {
       onBotAddedToGroup: options?.onBotAddedToGroup,
       onBotRemovedFromGroup: options?.onBotRemovedFromGroup,
       shouldProcessGroupMessage: options?.shouldProcessGroupMessage,
+      isGroupOwnerMessage: options?.isGroupOwnerMessage,
     });
   }
 

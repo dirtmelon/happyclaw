@@ -23,6 +23,9 @@ import {
   updateAgentLastImJid,
   updateAgentInfo,
   updateChatName,
+  getMessagesPageMulti,
+  deleteImContextBindingsByWorkspace,
+  listFeishuThreadAgentIds,
 } from '../db.js';
 import { DATA_DIR } from '../config.js';
 import type { RegisteredGroup, SubAgent } from '../types.js';
@@ -31,6 +34,43 @@ import { getChannelType, extractChatId } from '../im-channel.js';
 import { ensureAgentDirectories } from '../utils.js';
 
 const router = new Hono<{ Variables: Variables }>();
+
+/** Fetch Feishu chat info and check if the group is thread-capable. */
+async function checkFeishuThreadCapable(
+  userId: string,
+  imJid: string,
+  imGroup: RegisteredGroup,
+): Promise<{
+  threadCapable: boolean;
+  feishuInfo?: { chat_mode?: string; group_message_type?: string } | null;
+}> {
+  const channelType = getChannelType(imJid);
+  if (channelType !== 'feishu') return { threadCapable: false };
+  const deps = getWebDeps();
+  const feishuInfo = deps?.getFeishuChatInfo
+    ? await deps.getFeishuChatInfo(userId, extractChatId(imJid))
+    : null;
+  const threadCapable = isThreadCapableFeishuGroup({
+    channel_type: 'feishu',
+    chat_mode: feishuInfo?.chat_mode ?? imGroup.feishu_chat_mode,
+    group_message_type:
+      feishuInfo?.group_message_type ?? imGroup.feishu_group_message_type,
+  });
+  return { threadCapable, feishuInfo };
+}
+
+/** Update workspace RegisteredGroup in DB + in-memory cache. */
+function updateWorkspaceGroup(
+  jid: string,
+  workspace: RegisteredGroup,
+): void {
+  setRegisteredGroup(jid, workspace);
+  const deps = getWebDeps();
+  if (deps) {
+    const groups = deps.getRegisteredGroups();
+    groups[jid] = workspace;
+  }
+}
 
 // GET /api/groups/:jid/agents — list all agents for a group
 router.get('/:jid/agents', authMiddleware, async (c) => {
@@ -47,6 +87,26 @@ router.get('/:jid/agents', authMiddleware, async (c) => {
   }
 
   const agents = listAgentsByJid(jid);
+  const virtualChatJids = agents
+    .filter((a) => a.kind === 'conversation')
+    .map((a) => `${jid}#agent:${a.id}`);
+  const latestMessages = getMessagesPageMulti(
+    virtualChatJids,
+    undefined,
+    Math.max(virtualChatJids.length * 2, 50),
+  );
+  const latestByChatJid = new Map<
+    string,
+    { content: string; timestamp: string }
+  >();
+  for (const msg of latestMessages) {
+    if (!latestByChatJid.has(msg.chat_jid)) {
+      latestByChatJid.set(msg.chat_jid, {
+        content: msg.content,
+        timestamp: msg.timestamp,
+      });
+    }
+  }
   return c.json({
     agents: agents.map((a) => {
       const base = {
@@ -58,11 +118,23 @@ router.get('/:jid/agents', authMiddleware, async (c) => {
         created_at: a.created_at,
         completed_at: a.completed_at,
         result_summary: a.result_summary,
+        source_kind: a.source_kind ?? null,
+        thread_id: a.thread_id ?? null,
+        root_message_id: a.root_message_id ?? null,
+        title_source: a.title_source ?? null,
+        last_active_at: a.last_active_at ?? null,
       };
       if (a.kind === 'conversation') {
         const linked = getGroupsByTargetAgent(a.id);
+        const latest = latestByChatJid.get(`${jid}#agent:${a.id}`);
         return {
           ...base,
+          latest_message: latest
+            ? {
+                content: latest.content,
+                timestamp: latest.timestamp,
+              }
+            : null,
           linked_im_groups: linked.map((l) => ({
             jid: l.jid,
             name: l.group.name,
@@ -86,6 +158,12 @@ router.post('/:jid/agents', authMiddleware, async (c) => {
 
   if (!canAccessGroup(user, { ...group, jid })) {
     return c.json({ error: 'Forbidden' }, 403);
+  }
+  if (group.conversation_source === 'feishu_thread') {
+    return c.json(
+      { error: 'Feishu topic workspaces do not support manual conversations' },
+      400,
+    );
   }
 
   const body = await c.req.json().catch(() => ({}));
@@ -142,6 +220,11 @@ router.post('/:jid/agents', authMiddleware, async (c) => {
       status: agent.status,
       kind: agent.kind,
       created_at: agent.created_at,
+      source_kind: agent.source_kind ?? null,
+      thread_id: agent.thread_id ?? null,
+      root_message_id: agent.root_message_id ?? null,
+      title_source: agent.title_source ?? null,
+      last_active_at: agent.last_active_at ?? null,
     },
   });
 });
@@ -163,6 +246,12 @@ router.patch('/:jid/agents/:agentId', authMiddleware, async (c) => {
   const agent = getAgent(agentId);
   if (!agent || agent.chat_jid !== jid) {
     return c.json({ error: 'Agent not found' }, 404);
+  }
+  if (agent.source_kind === 'feishu_thread') {
+    return c.json(
+      { error: 'Feishu topic conversations use read-only titles' },
+      400,
+    );
   }
 
   const body = await c.req.json().catch(() => ({}));
@@ -211,7 +300,6 @@ router.delete('/:jid/agents/:agentId', authMiddleware, async (c) => {
   if (!agent || agent.chat_jid !== jid) {
     return c.json({ error: 'Agent not found' }, 404);
   }
-
   // Block deletion if conversation agent has active IM bindings
   if (agent.kind === 'conversation') {
     const linkedImGroups = getGroupsByTargetAgent(agentId);
@@ -305,6 +393,17 @@ function isTelegramPrivateChat(jid: string): boolean {
   return !id.startsWith('-');
 }
 
+function isThreadCapableFeishuGroup(info?: {
+  channel_type?: string;
+  chat_mode?: string;
+  group_message_type?: string;
+}): boolean {
+  if (!info || info.channel_type !== 'feishu') return false;
+  return (
+    info.chat_mode === 'topic' || info.group_message_type === 'thread'
+  );
+}
+
 // GET /api/groups/:jid/im-groups — list available IM group chats for this folder
 router.get('/:jid/im-groups', authMiddleware, async (c) => {
   const jid = decodeURIComponent(c.req.param('jid'));
@@ -333,6 +432,7 @@ router.get('/:jid/im-groups', authMiddleware, async (c) => {
     name: string;
     bound_agent_id: string | null;
     bound_main_jid: string | null;
+    binding_mode: 'single_context' | 'thread_map';
     reply_policy: 'source_only' | 'mirror';
     bound_target_name: string | null;
     bound_workspace_name: string | null;
@@ -340,7 +440,10 @@ router.get('/:jid/im-groups', authMiddleware, async (c) => {
     member_count?: number;
     channel_type: string;
     chat_mode?: string; // 'p2p' | 'group' — from Feishu API (distinguishes P2P vs group chat)
+    group_message_type?: string;
+    is_thread_capable?: boolean;
     activation_mode?: string;
+    owner_im_id?: string | null;
   }
 
   const candidates: ImGroupCandidate[] = [];
@@ -378,11 +481,20 @@ router.get('/:jid/im-groups', authMiddleware, async (c) => {
       name: g.name,
       bound_agent_id: g.target_agent_id ?? null,
       bound_main_jid: g.target_main_jid ?? null,
+      binding_mode: g.binding_mode ?? 'single_context',
       reply_policy: g.reply_policy === 'mirror' ? 'mirror' : 'source_only',
       bound_target_name: boundTargetName,
       bound_workspace_name: boundWorkspaceName,
       channel_type: getChannelType(j) ?? 'unknown',
+      chat_mode: g.feishu_chat_mode,
+      group_message_type: g.feishu_group_message_type,
+      is_thread_capable: isThreadCapableFeishuGroup({
+        channel_type: getChannelType(j) ?? undefined,
+        chat_mode: g.feishu_chat_mode,
+        group_message_type: g.feishu_group_message_type,
+      }),
       activation_mode: g.activation_mode,
+      owner_im_id: g.owner_im_id ?? null,
     });
   }
 
@@ -398,6 +510,12 @@ router.get('/:jid/im-groups', authMiddleware, async (c) => {
       if (info) {
         g.avatar = info.avatar;
         g.chat_mode = info.chat_mode;
+        g.group_message_type = info.group_message_type;
+        g.is_thread_capable = isThreadCapableFeishuGroup({
+          channel_type: g.channel_type,
+          chat_mode: info.chat_mode,
+          group_message_type: info.group_message_type,
+        });
         if (info.user_count != null) {
           const count = parseInt(info.user_count, 10);
           if (!isNaN(count)) g.member_count = count;
@@ -411,9 +529,7 @@ router.get('/:jid/im-groups', authMiddleware, async (c) => {
   // Feishu: all registered chats (group and p2p) are now returned.
   // The member_count filter was removed because p2p chats have user_count=0 or 1
   // from the Feishu API (counting non-bot users), which is not a meaningful filter.
-  const imGroups = candidates.map(({ chat_mode: _, ...rest }) => rest);
-
-  return c.json({ imGroups });
+  return c.json({ imGroups: candidates });
 });
 
 // PUT /api/groups/:jid/agents/:agentId/im-binding — bind an IM group to this agent
@@ -454,6 +570,16 @@ router.put('/:jid/agents/:agentId/im-binding', authMiddleware, async (c) => {
   if (!canAccessGroup(user, { ...imGroup, jid: imJid })) {
     return c.json({ error: 'Forbidden' }, 403);
   }
+  const { threadCapable } = await checkFeishuThreadCapable(user.id, imJid, imGroup);
+  if (threadCapable) {
+    return c.json(
+      {
+        error:
+          'Feishu topic/thread groups can only bind to a workspace, not a single conversation',
+      },
+      400,
+    );
+  }
   const force = body.force === true;
   const replyPolicy = body.reply_policy === 'mirror' ? 'mirror' : 'source_only';
   const hasConflict =
@@ -471,9 +597,9 @@ router.put('/:jid/agents/:agentId/im-binding', authMiddleware, async (c) => {
     reply_policy: replyPolicy,
   };
   setRegisteredGroup(imJid, updated);
-  const deps = getWebDeps();
-  if (deps) {
-    const groups = deps.getRegisteredGroups();
+  const webDeps = getWebDeps();
+  if (webDeps) {
+    const groups = webDeps.getRegisteredGroups();
     if (groups[imJid]) groups[imJid] = updated;
   }
 
@@ -567,6 +693,7 @@ router.put('/:jid/im-binding', authMiddleware, async (c) => {
   if (!canAccessGroup(user, { ...imGroup, jid: imJid })) {
     return c.json({ error: 'Forbidden' }, 403);
   }
+  const { threadCapable, feishuInfo } = await checkFeishuThreadCapable(user.id, imJid, imGroup);
   const targetMainJid = jid; // Use actual registered JID (not folder-based)
   const legacyMainJid = `web:${group.folder}`;
   const force = body.force === true;
@@ -585,11 +712,34 @@ router.put('/:jid/im-binding', authMiddleware, async (c) => {
   if (hasConflict && !force) {
     return c.json({ error: 'IM group is already bound elsewhere' }, 409);
   }
+  if (group.conversation_source === 'feishu_thread' && !threadCapable) {
+    return c.json(
+      { error: 'Topic workspaces only accept Feishu topic/thread group bindings' },
+      400,
+    );
+  }
+
+  if (threadCapable) {
+    const currentThreadMap = Object.entries(getAllRegisteredGroups()).find(
+      ([otherJid, otherGroup]) =>
+        otherJid !== imJid &&
+        otherGroup.binding_mode === 'thread_map' &&
+        (otherGroup.target_main_jid === targetMainJid ||
+          otherGroup.target_main_jid === legacyMainJid),
+    );
+    if (currentThreadMap) {
+      return c.json(
+        { error: 'Workspace already has a Feishu topic group binding' },
+        409,
+      );
+    }
+  }
 
   // Parse activation_mode from request body
   const validActivationModes = [
     'always',
     'when_mentioned',
+    'owner_mentioned',
     'auto',
     'disabled',
   ] as const;
@@ -602,15 +752,27 @@ router.put('/:jid/im-binding', authMiddleware, async (c) => {
       ? (rawActivationMode as (typeof validActivationModes)[number])
       : undefined;
 
+  // Parse owner_im_id for owner_mentioned mode
+  // 如果前端传了 owner_im_id 就用，否则 owner_mentioned 模式下自动设为空（后续首条消息自动学习）
+  const ownerImId =
+    typeof body.owner_im_id === 'string' && body.owner_im_id.trim()
+      ? body.owner_im_id.trim()
+      : undefined;
+
   // Update DB + in-memory cache — clear target_agent_id to avoid conflicts
   const updated: RegisteredGroup = {
     ...imGroup,
     target_main_jid: targetMainJid,
     target_agent_id: undefined,
+    binding_mode: threadCapable ? 'thread_map' : 'single_context',
+    feishu_chat_mode: feishuInfo?.chat_mode ?? imGroup.feishu_chat_mode,
+    feishu_group_message_type:
+      feishuInfo?.group_message_type ?? imGroup.feishu_group_message_type,
     ...(replyPolicy !== undefined ? { reply_policy: replyPolicy } : {}),
     ...(activationMode !== undefined
       ? { activation_mode: activationMode }
       : {}),
+    ...(ownerImId !== undefined ? { owner_im_id: ownerImId } : {}),
   };
   setRegisteredGroup(imJid, updated);
   const deps = getWebDeps();
@@ -618,9 +780,22 @@ router.put('/:jid/im-binding', authMiddleware, async (c) => {
     const groups = deps.getRegisteredGroups();
     if (groups[imJid]) groups[imJid] = updated;
   }
+  if (threadCapable) {
+    updateWorkspaceGroup(jid, {
+      ...group,
+      conversation_source: 'feishu_thread',
+      conversation_nav_mode: 'vertical_threads',
+    });
+  }
 
   logger.info(
-    { imJid, targetMainJid, activationMode, userId: user.id },
+    {
+      imJid,
+      targetMainJid,
+      activationMode,
+      threadCapable,
+      userId: user.id,
+    },
     'IM group bound to workspace main conversation',
   );
   return c.json({ success: true });
@@ -661,12 +836,26 @@ router.delete('/:jid/im-binding/:imJid', authMiddleware, async (c) => {
     ...imGroup,
     target_main_jid: undefined,
     activation_mode: 'auto' as const,
+    binding_mode: 'single_context' as const,
   };
   setRegisteredGroup(imJid, updated);
   const deps = getWebDeps();
   if (deps) {
     const groups = deps.getRegisteredGroups();
     if (groups[imJid]) groups[imJid] = updated;
+  }
+  if (imGroup.binding_mode === 'thread_map') {
+    // Clean up feishu_thread agents and their bindings
+    const threadAgentIds = listFeishuThreadAgentIds(jid);
+    for (const agentId of threadAgentIds) {
+      deleteAgent(agentId);
+    }
+    deleteImContextBindingsByWorkspace(jid);
+    updateWorkspaceGroup(jid, {
+      ...group,
+      conversation_source: 'manual',
+      conversation_nav_mode: 'horizontal',
+    });
   }
 
   logger.info(

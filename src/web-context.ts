@@ -65,6 +65,7 @@ export interface WebDeps {
     user_count?: string;
     chat_type?: string;
     chat_mode?: string;
+    group_message_type?: string;
   } | null>;
   clearImFailCounts?: (jid: string) => void;
   updateReplyRoute?: (folder: string, sourceJid: string | null) => void;

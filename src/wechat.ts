@@ -169,7 +169,11 @@ function extractTextContent(items: MessageItem[]): string {
         parts.push('(voice)');
       }
     } else if (item.type === MESSAGE_ITEM_TYPE_FILE) {
-      parts.push(`(file: ${item.file_item?.file_name ?? 'unknown'})`);
+      // Only add placeholder if no CDN media to download
+      // (processFileItem will generate a [文件: ...] prefix for downloadable files)
+      if (!item.file_item?.media?.encrypt_query_param) {
+        parts.push(`(file: ${item.file_item?.file_name ?? 'unknown'})`);
+      }
     } else if (item.type === 5 /* VIDEO */) {
       parts.push('(video)');
     }
@@ -389,7 +393,57 @@ export function createWeChatConnection(
     }
   }
 
-  // ─── Image Handling ───────────────────────────────────────
+  // ─── CDN Media Download ────────────────────────────────────
+
+  /**
+   * Download, decrypt, and save a CDN media item (image, file, etc.).
+   * `resolveFileName` receives the decrypted buffer so callers can inspect
+   * content (e.g. MIME-detect for images) before choosing a name.
+   */
+  async function downloadCdnMediaItem(
+    media: CDNMedia | undefined,
+    groupFolder: string | undefined,
+    label: string,
+    resolveFileName: (buffer: Buffer) => string,
+  ): Promise<{ buffer: Buffer; savedPath?: string } | null> {
+    if (!media?.encrypt_query_param || !media?.aes_key) {
+      logger.debug(`WeChat ${label} missing media or aes_key, skipping`);
+      return null;
+    }
+
+    const buffer = await downloadAndDecryptMedia(
+      media.encrypt_query_param,
+      media.aes_key,
+      cdnBaseUrl,
+    );
+
+    if (!buffer || buffer.length === 0) {
+      logger.warn(`WeChat ${label} download returned empty buffer`);
+      return null;
+    }
+
+    if (buffer.length > MAX_FILE_SIZE) {
+      logger.warn(
+        { size: buffer.length },
+        `WeChat ${label} exceeds max file size, skipping`,
+      );
+      return null;
+    }
+
+    let savedPath: string | undefined;
+    if (groupFolder) {
+      try {
+        const fileName = resolveFileName(buffer);
+        savedPath =
+          (await saveDownloadedFile(groupFolder, 'wechat', fileName, buffer)) ??
+          undefined;
+      } catch (err) {
+        logger.warn({ err }, `Failed to save WeChat ${label} to disk`);
+      }
+    }
+
+    return { buffer, savedPath };
+  }
 
   async function processImageItem(
     item: MessageItem,
@@ -399,69 +453,36 @@ export function createWeChatConnection(
     attachmentEntry?: { type: string; data: string; mimeType: string };
     textPrefix?: string;
   }> {
-    const imageItem = item.image_item;
-    if (!imageItem) return {};
-
-    const media = imageItem.media;
-    if (!media?.encrypt_query_param || !media?.aes_key) {
-      logger.debug('WeChat image missing media or aes_key, skipping');
-      return {};
-    }
-
     try {
-      const buffer = await downloadAndDecryptMedia(
-        media.encrypt_query_param,
-        media.aes_key,
-        cdnBaseUrl,
+      const result = await downloadCdnMediaItem(
+        item.image_item?.media,
+        groupFolder,
+        'image',
+        (buffer) => {
+          const mimeType = detectImageMimeType(buffer);
+          const extMap: Record<string, string> = {
+            'image/jpeg': '.jpg',
+            'image/png': '.png',
+            'image/gif': '.gif',
+            'image/webp': '.webp',
+          };
+          return `wechat_img_${msgIdentifier}${extMap[mimeType] ?? '.jpg'}`;
+        },
       );
+      if (!result) return {};
 
-      if (!buffer || buffer.length === 0) {
-        logger.warn('WeChat image download returned empty buffer');
-        return {};
-      }
+      const textPrefix = result.savedPath
+        ? `[图片: ${result.savedPath}]`
+        : undefined;
 
-      if (buffer.length > MAX_FILE_SIZE) {
-        logger.warn(
-          { size: buffer.length },
-          'WeChat image exceeds max file size, skipping',
-        );
-        return {};
-      }
-
-      const mimeType = detectImageMimeType(buffer);
-      const extMap: Record<string, string> = {
-        'image/jpeg': '.jpg',
-        'image/png': '.png',
-        'image/gif': '.gif',
-        'image/webp': '.webp',
-      };
-      const ext = extMap[mimeType] ?? '.jpg';
-      const fileName = `wechat_img_${msgIdentifier}${ext}`;
-
-      // Save to workspace
-      let textPrefix: string | undefined;
-      if (groupFolder) {
-        try {
-          const relPath = await saveDownloadedFile(
-            groupFolder,
-            'wechat',
-            fileName,
-            buffer,
-          );
-          if (relPath) textPrefix = `[图片: ${relPath}]`;
-        } catch (err) {
-          logger.warn({ err }, 'Failed to save WeChat image to disk');
-        }
-      }
-
-      // Inline base64 for small images
       let attachmentEntry:
         | { type: string; data: string; mimeType: string }
         | undefined;
-      if (buffer.length <= IMAGE_MAX_BASE64_SIZE) {
+      if (result.buffer.length <= IMAGE_MAX_BASE64_SIZE) {
+        const mimeType = detectImageMimeType(result.buffer);
         attachmentEntry = {
           type: 'image',
-          data: buffer.toString('base64'),
+          data: result.buffer.toString('base64'),
           mimeType,
         };
       }
@@ -470,6 +491,27 @@ export function createWeChatConnection(
     } catch (err) {
       logger.warn({ err }, 'WeChat image download/decrypt failed, skipping');
       return {};
+    }
+  }
+
+  async function processFileItem(
+    item: MessageItem,
+    groupFolder: string | undefined,
+  ): Promise<string | null> {
+    const fileName = item.file_item?.file_name || 'unknown_file';
+    try {
+      const result = await downloadCdnMediaItem(
+        item.file_item?.media,
+        groupFolder,
+        'file',
+        () => fileName,
+      );
+      if (result?.savedPath) return `[文件: ${result.savedPath}]`;
+      // CDN media unavailable, fall back to name-only label
+      return `[文件: ${fileName}]`;
+    } catch (err) {
+      logger.warn({ err, fileName }, 'WeChat file download/decrypt failed');
+      return `[文件: ${fileName}]`;
     }
   }
 
@@ -557,38 +599,34 @@ export function createWeChatConnection(
         }[] = [];
         const textPrefixes: string[] = [];
 
-        // Download images in parallel (independent CDN requests)
+        // Note: textPrefixes order depends on CDN response time, not message item order
+        // Download images and files in parallel (independent CDN requests)
         const msgId =
           msg.message_id !== undefined
             ? String(msg.message_id)
             : String(msg.seq ?? Date.now());
-        const imageItems = msg.item_list.filter(
-          (item) => item.type === MESSAGE_ITEM_TYPE_IMAGE,
-        );
-        if (imageItems.length > 0) {
-          const results = await Promise.allSettled(
-            imageItems.map((item) =>
-              processImageItem(item, msgId.slice(-8), groupFolder),
-            ),
-          );
-          for (const r of results) {
-            if (r.status === 'fulfilled') {
-              if (r.value.attachmentEntry) {
-                imageAttachments.push(r.value.attachmentEntry);
-              }
-              if (r.value.textPrefix) {
-                textPrefixes.push(r.value.textPrefix);
-              }
-            }
+
+        const mediaPromises: Promise<void>[] = [];
+
+        for (const item of msg.item_list) {
+          if (item.type === MESSAGE_ITEM_TYPE_IMAGE) {
+            mediaPromises.push(
+              processImageItem(item, msgId.slice(-8), groupFolder).then((r) => {
+                if (r.attachmentEntry) imageAttachments.push(r.attachmentEntry);
+                if (r.textPrefix) textPrefixes.push(r.textPrefix);
+              }),
+            );
+          } else if (item.type === MESSAGE_ITEM_TYPE_FILE) {
+            mediaPromises.push(
+              processFileItem(item, groupFolder).then((label) => {
+                if (label) textPrefixes.push(label);
+              }),
+            );
           }
         }
 
-        // Handle file items — note the path in content
-        for (const item of msg.item_list) {
-          if (item.type === MESSAGE_ITEM_TYPE_FILE && item.file_item) {
-            const fileName = item.file_item.file_name || 'unknown_file';
-            content = `[文件: ${fileName}]\n${content}`.trim();
-          }
+        if (mediaPromises.length > 0) {
+          await Promise.allSettled(mediaPromises);
         }
 
         if (imageAttachments.length > 0) {

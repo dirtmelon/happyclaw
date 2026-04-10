@@ -16,7 +16,9 @@ export interface GroupInfo {
   custom_cwd?: string;
   created_by?: string;
   pinned_at?: string;
-  activation_mode?: 'auto' | 'always' | 'when_mentioned' | 'disabled';
+  activation_mode?: 'auto' | 'always' | 'when_mentioned' | 'owner_mentioned' | 'disabled';
+  conversation_source?: 'manual' | 'feishu_thread';
+  conversation_nav_mode?: 'horizontal' | 'vertical_threads';
 }
 
 export interface AgentInfo {
@@ -29,6 +31,12 @@ export interface AgentInfo {
   completed_at?: string;
   result_summary?: string;
   linked_im_groups?: Array<{ jid: string; name: string }>;
+  source_kind?: 'manual' | 'feishu_thread' | null;
+  thread_id?: string | null;
+  root_message_id?: string | null;
+  title_source?: 'manual' | 'feishu_root' | null;
+  last_active_at?: string | null;
+  latest_message?: { content: string; timestamp: string } | null;
 }
 
 export interface AvailableImGroup {
@@ -42,7 +50,12 @@ export interface AvailableImGroup {
   avatar?: string;
   member_count?: number;
   channel_type: string;
-  activation_mode?: 'auto' | 'always' | 'when_mentioned' | 'disabled';
+  activation_mode?: 'auto' | 'always' | 'when_mentioned' | 'owner_mentioned' | 'disabled';
+  owner_im_id?: string | null;
+  binding_mode?: 'single_context' | 'thread_map';
+  chat_mode?: string;
+  group_message_type?: string;
+  is_thread_capable?: boolean;
 }
 
 export interface GroupMember {

@@ -193,7 +193,7 @@ export const GroupPatchSchema = z.object({
   name: z.string().min(1).max(MAX_GROUP_NAME_LEN).optional(),
   is_pinned: z.boolean().optional(),
   activation_mode: z
-    .enum(['auto', 'always', 'when_mentioned', 'disabled'])
+    .enum(['auto', 'always', 'when_mentioned', 'owner_mentioned', 'disabled'])
     .optional(),
   execution_mode: z.enum(['container', 'host']).optional(),
 });
@@ -710,12 +710,14 @@ export const DingTalkConfigSchema = z
     clientSecret: z.string().max(2000).optional(),
     clearClientSecret: z.boolean().optional(),
     enabled: z.boolean().optional(),
+    streamingMode: z.enum(['card', 'text']).optional(),
   })
   .refine(
     (data) =>
       typeof data.clientId === 'string' ||
       typeof data.clientSecret === 'string' ||
       data.clearClientSecret === true ||
-      typeof data.enabled === 'boolean',
+      typeof data.enabled === 'boolean' ||
+      typeof data.streamingMode === 'string',
     { message: 'At least one config field must be provided' },
   );

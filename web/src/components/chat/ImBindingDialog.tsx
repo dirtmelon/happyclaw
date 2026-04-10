@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
-import { Loader2, Link2, Unlink, MessageSquare, Users, ArrowRightLeft } from 'lucide-react';
+import { Loader2, Link2, Unlink, MessageSquare, Users, ArrowRightLeft, Info } from 'lucide-react';
 import {
   Dialog,
   DialogContent,
@@ -26,6 +26,7 @@ interface ImBindingDialogProps {
 const ACTIVATION_MODE_OPTIONS = [
   { value: 'always', label: '始终响应' },
   { value: 'when_mentioned', label: '仅 @mention' },
+  { value: 'owner_mentioned', label: '仅我 @mention' },
 ] as const;
 
 export function ImBindingDialog({ open, groupJid, agentId, agent, onClose }: ImBindingDialogProps) {
@@ -195,6 +196,15 @@ export function ImBindingDialog({ open, groupJid, agentId, agent, onClose }: ImB
     ? '绑定 IM 渠道 — 主对话'
     : `绑定 IM 渠道${agent ? ` — ${agent.name}` : ''}`;
 
+  const renderThreadCapability = (group: AvailableImGroup) => {
+    if (!group.is_thread_capable) return null;
+    return (
+      <span className="inline-flex items-center rounded-full border border-sky-200 bg-sky-50 px-2 py-0.5 text-[10px] font-medium text-sky-700 dark:border-sky-800 dark:bg-sky-950/30 dark:text-sky-300">
+        话题群
+      </span>
+    );
+  };
+
   return (<>
     <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
       <DialogContent className="sm:max-w-md">
@@ -204,6 +214,12 @@ export function ImBindingDialog({ open, groupJid, agentId, agent, onClose }: ImB
             {title}
           </DialogTitle>
         </DialogHeader>
+
+        {isMainMode && (
+          <div className="rounded-lg border border-border/70 bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+            绑定飞书话题群后，工作区会切换为竖向话题列表，每个飞书话题都会自动映射成一个独立会话。
+          </div>
+        )}
 
         {/* Filter input — only show when there are groups */}
         {!loading && imGroups.length > 0 && (
@@ -242,6 +258,7 @@ export function ImBindingDialog({ open, groupJid, agentId, agent, onClose }: ImB
               const boundToThis = isBoundToThis(group);
               const boundToOther = isBoundToOther(group);
               const isActioning = actionLoading === group.jid;
+              const cannotBindToAgent = !isMainMode && !!group.is_thread_capable;
 
               return (
                 <div
@@ -269,7 +286,10 @@ export function ImBindingDialog({ open, groupJid, agentId, agent, onClose }: ImB
 
                   {/* Group info */}
                   <div className="flex-1 min-w-0">
-                    <div className="text-sm font-medium truncate">{group.name}</div>
+                    <div className="flex items-center gap-2">
+                      <div className="text-sm font-medium truncate">{group.name}</div>
+                      {renderThreadCapability(group)}
+                    </div>
                     <div className="flex items-center gap-2 text-xs text-muted-foreground">
                       <ChannelBadge channelType={group.channel_type} />
                       {group.member_count != null && (
@@ -289,34 +309,57 @@ export function ImBindingDialog({ open, groupJid, agentId, agent, onClose }: ImB
                         </span>
                       )}
                     </div>
+                    {cannotBindToAgent && (
+                      <div className="mt-1 text-[11px] text-muted-foreground">
+                        该群会按飞书话题自动映射，只能绑定到工作区主对话。
+                      </div>
+                    )}
                   </div>
 
                   {/* Activation mode selector — only for main mode + unbound feishu group chats */}
                   {isMainMode && group.channel_type === 'feishu' && !boundToThis && !boundToOther && (
-                    <select
-                      value={activationModes[group.jid] || 'always'}
-                      onChange={(e) => setActivationModes((prev) => ({ ...prev, [group.jid]: e.target.value }))}
-                      className="flex-shrink-0 text-xs px-1.5 py-1 rounded border border-border bg-background text-foreground"
-                    >
-                      {ACTIVATION_MODE_OPTIONS.map((o) => (
-                        <option key={o.value} value={o.value}>{o.label}</option>
-                      ))}
-                    </select>
+                    <div className="flex-shrink-0 flex flex-col items-end gap-1">
+                      <select
+                        value={activationModes[group.jid] || 'always'}
+                        onChange={(e) => setActivationModes((prev) => ({ ...prev, [group.jid]: e.target.value }))}
+                        className="text-xs px-1.5 py-1 rounded border border-border bg-background text-foreground"
+                      >
+                        {ACTIVATION_MODE_OPTIONS.map((o) => (
+                          <option key={o.value} value={o.value}>{o.label}</option>
+                        ))}
+                      </select>
+                      {(activationModes[group.jid] || 'always') === 'owner_mentioned' && (
+                        <span className="text-[10px] text-amber-600 dark:text-amber-400 flex items-start gap-0.5 max-w-[140px] leading-tight">
+                          <Info className="w-3 h-3 flex-shrink-0 mt-px" />
+                          绑定后需在群里发 /owner_mention 注册身份
+                        </span>
+                      )}
+                    </div>
                   )}
 
                   {/* Action button — three states: unbind / rebind / bind */}
                   {boundToThis ? (
-                    <div className="flex items-center gap-1.5 flex-shrink-0">
+                    <div className="flex flex-col items-end gap-1 flex-shrink-0">
                       {isMainMode && group.channel_type === 'feishu' && (
-                        <select
-                          value={activationModes[group.jid] || group.activation_mode || 'always'}
-                          onChange={(e) => handleActivationModeChange(group.jid, e.target.value)}
-                          className="text-xs px-1.5 py-1 rounded border border-border bg-background text-foreground"
-                        >
-                          {ACTIVATION_MODE_OPTIONS.map((o) => (
-                            <option key={o.value} value={o.value}>{o.label}</option>
-                          ))}
-                        </select>
+                        <div className="flex items-center gap-1.5">
+                          <select
+                            value={activationModes[group.jid] || group.activation_mode || 'always'}
+                            onChange={(e) => handleActivationModeChange(group.jid, e.target.value)}
+                            className="text-xs px-1.5 py-1 rounded border border-border bg-background text-foreground"
+                          >
+                            {ACTIVATION_MODE_OPTIONS.map((o) => (
+                              <option key={o.value} value={o.value}>{o.label}</option>
+                            ))}
+                          </select>
+                        </div>
+                      )}
+                      {isMainMode && group.channel_type === 'feishu' &&
+                        (activationModes[group.jid] || group.activation_mode || 'always') === 'owner_mentioned' &&
+                        !group.owner_im_id && (
+                        <span className="text-[10px] text-amber-600 dark:text-amber-400 flex items-start gap-0.5 max-w-[140px] leading-tight">
+                          <Info className="w-3 h-3 flex-shrink-0 mt-px" />
+                          请在群里发 /owner_mention 注册身份
+                        </span>
                       )}
                       <Button
                         size="sm"
@@ -346,6 +389,15 @@ export function ImBindingDialog({ open, groupJid, agentId, agent, onClose }: ImB
                         <ArrowRightLeft className="w-3 h-3 mr-1" />
                       )}
                       换绑
+                    </Button>
+                  ) : cannotBindToAgent ? (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled
+                      className="flex-shrink-0"
+                    >
+                      仅工作区绑定
                     </Button>
                   ) : (
                     <Button

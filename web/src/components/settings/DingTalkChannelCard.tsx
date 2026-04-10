@@ -14,6 +14,7 @@ interface UserDingTalkConfig {
   hasClientSecret: boolean;
   clientSecretMasked: string | null;
   enabled: boolean;
+  streamingMode: 'card' | 'text';
   connected: boolean;
   updatedAt: string | null;
 }
@@ -28,6 +29,7 @@ export function DingTalkChannelCard() {
   const [toggling, setToggling] = useState(false);
 
   const enabled = config?.enabled ?? false;
+  const streamingMode = config?.streamingMode ?? 'card';
 
   const loadConfig = useCallback(async () => {
     setLoading(true);
@@ -62,6 +64,19 @@ export function DingTalkChannelCard() {
       toast.error(getErrorMessage(err, '切换钉钉渠道状态失败'));
     } finally {
       setToggling(false);
+    }
+  };
+
+  const handleStreamingModeToggle = async (useCard: boolean) => {
+    try {
+      const data = await api.put<UserDingTalkConfig>(
+        '/api/config/user-im/dingtalk',
+        { streamingMode: useCard ? 'card' : 'text' },
+      );
+      setConfig(data);
+      toast.success(`已切换为${useCard ? '流式卡片' : '普通文本'}模式`);
+    } catch (err) {
+      toast.error(getErrorMessage(err, '切换流式模式失败'));
     }
   };
 
@@ -186,6 +201,21 @@ export function DingTalkChannelCard() {
                   测试连接
                 </Button>
               )}
+            </div>
+
+            <div className="flex items-center justify-between py-2 border-t border-slate-100">
+              <div>
+                <p className="text-sm font-medium text-slate-700">流式卡片模式</p>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  {streamingMode === 'card'
+                    ? 'AI 回复以打字机效果实时展示'
+                    : 'AI 回复以普通文本消息发送'}
+                </p>
+              </div>
+              <Switch
+                checked={streamingMode === 'card'}
+                onCheckedChange={(checked) => handleStreamingModeToggle(checked)}
+              />
             </div>
 
             <div className="text-xs text-slate-400 mt-2">

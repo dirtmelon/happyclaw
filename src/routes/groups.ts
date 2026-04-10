@@ -52,6 +52,8 @@ import {
   getUserPinnedGroups,
   pinGroup,
   unpinGroup,
+  deleteAgent,
+  deleteImContextBindingsByWorkspace,
 } from '../db.js';
 import { logger } from '../logger.js';
 import {
@@ -153,7 +155,9 @@ interface GroupPayloadItem {
   member_role?: 'owner' | 'member';
   member_count?: number;
   pinned_at?: string;
-  activation_mode?: 'auto' | 'always' | 'when_mentioned' | 'disabled';
+  activation_mode?: 'auto' | 'always' | 'when_mentioned' | 'owner_mentioned' | 'disabled';
+  conversation_source?: 'manual' | 'feishu_thread';
+  conversation_nav_mode?: 'horizontal' | 'vertical_threads';
 }
 
 function buildGroupsPayload(user: AuthUser): Record<string, GroupPayloadItem> {
@@ -262,6 +266,8 @@ function buildGroupsPayload(user: AuthUser): Record<string, GroupPayloadItem> {
       member_count: isShared ? memberInfo?.count : undefined,
       pinned_at: pins[jid] || undefined,
       activation_mode: group.activation_mode ?? 'auto',
+      conversation_source: group.conversation_source ?? 'manual',
+      conversation_nav_mode: group.conversation_nav_mode ?? 'horizontal',
     };
   }
 
@@ -1184,6 +1190,22 @@ groupRoutes.post('/:jid/clear-history', authMiddleware, async (c) => {
       'Failed to clear history state',
     );
     return c.json({ error: 'Failed to clear history' }, 500);
+  }
+
+  // 4. Clear conversation agents and their messages.
+  try {
+    const agents = listAgentsByJid(jid);
+    for (const agent of agents) {
+      const virtualJid = `${jid}#agent:${agent.id}`;
+      deleteChatHistory(virtualJid);
+      deleteAgent(agent.id);
+    }
+    deleteImContextBindingsByWorkspace(jid);
+  } catch (err) {
+    logger.warn(
+      { jid, err },
+      'Failed to clear agents during workspace rebuild (non-fatal)',
+    );
   }
 
   logger.info(
