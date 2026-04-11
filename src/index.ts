@@ -473,7 +473,7 @@ const queue = new GroupQueue();
 const EMPTY_CURSOR: MessageCursor = { timestamp: '', id: '' };
 const terminalWarmupInFlight = new Set<string>();
 const STUCK_RUNNER_CHECK_INTERVAL_POLLS = 15;
-const STUCK_RUNNER_IDLE_MS = 6 * 60 * 1000;
+const STUCK_RUNNER_IDLE_MS = 3 * 60 * 1000;
 let stuckRunnerCheckCounter = 0;
 
 // OOM auto-recovery: track consecutive OOM (exit code 137) exits per folder.
@@ -2920,6 +2920,35 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
               // Previously only rebuilt for partial outputs (#223); now rebuild for
               // all completions to fix DingTalk "second message gets no reply" bug.
               if (streamingCardHandledIM) {
+                // Streaming card strips local image references (only img_xxx keys
+                // are valid in Feishu cards).  Send any local images as separate
+                // messages so they are not silently lost.
+                if (localImagePaths.length > 0 && replySourceImJid) {
+                  for (const imgPath of localImagePaths) {
+                    try {
+                      const imgBuf = fs.readFileSync(imgPath);
+                      const mimeType =
+                        path.extname(imgPath).toLowerCase() === '.png'
+                          ? 'image/png'
+                          : 'image/jpeg';
+                      await imManager.sendImage(
+                        replySourceImJid,
+                        imgBuf,
+                        mimeType,
+                      );
+                      logger.info(
+                        { chatJid, imgPath },
+                        'Sent local image after streaming card completion',
+                      );
+                    } catch (imgErr) {
+                      logger.warn(
+                        { chatJid, imgPath, err: imgErr },
+                        'Failed to send local image after streaming card',
+                      );
+                    }
+                  }
+                }
+
                 unregisterStreamingSession(streamingSessionJid);
                 streamingAccumulatedText = '';
                 streamingAccumulatedThinking = '';
@@ -6084,9 +6113,54 @@ async function startMessageLoop(): Promise<void> {
   }
 }
 
+/**
+ * Check if a process tree has actively working child processes.
+ * Returns true if any descendant is consuming CPU (> 0.5%), indicating
+ * real work (training, processing) rather than a network-blocked hang.
+ */
+function hasActiveCpuDescendants(pid: number): boolean {
+  try {
+    const { execSync } = require('child_process');
+    // Get all descendant PIDs recursively using pgrep
+    const pids = execSync(`pgrep -P ${pid}`, {
+      timeout: 3000,
+      encoding: 'utf8',
+    }).trim();
+    if (!pids) return false;
+
+    // Check CPU usage of all child PIDs
+    const pidList = pids.split('\n').join(',');
+    const psOutput = execSync(`ps -p ${pidList} -o pid=,pcpu=`, {
+      timeout: 3000,
+      encoding: 'utf8',
+    }).trim();
+    if (!psOutput) return false;
+
+    for (const line of psOutput.split('\n')) {
+      const cpu = parseFloat(line.trim().split(/\s+/)[1] || '0');
+      if (cpu > 0.5) return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 function recoverStuckPendingGroups(): void {
   const stuckGroups = queue.getStuckPendingGroups(STUCK_RUNNER_IDLE_MS);
   for (const { jid, idleMs } of stuckGroups) {
+    // Before restarting, check if the runner process has active child processes.
+    // If children exist, the agent is likely executing a long-running command
+    // (e.g. training, downloading datasets) — skip restart to avoid killing it.
+    const pid = queue.getRunnerPid(jid);
+    if (pid && hasActiveCpuDescendants(pid)) {
+      logger.info(
+        { chatJid: jid, idleMs, pid },
+        'Runner idle but has CPU-active child processes; skipping restart',
+      );
+      continue;
+    }
+
     logger.warn(
       { chatJid: jid, idleMs },
       'Runner has pending messages but no activity; restarting',
