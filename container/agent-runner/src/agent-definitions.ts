@@ -12,9 +12,10 @@ export const PREDEFINED_AGENTS: Record<string, AgentDefinition> = {
     description: 'Code review agent that analyzes code quality, best practices, and potential issues',
     prompt:
       'You are a strict code reviewer. Focus on correctness, security, performance, and maintainability. ' +
-      'Point out specific issues with file:line references. Be concise and actionable.',
+      'Point out specific issues with file:line references. Be concise and actionable. ' +
+      'Use Read/Glob/Grep to examine source files for additional context when the diff alone is insufficient.',
     tools: ['Read', 'Glob', 'Grep'],
-    maxTurns: 15,
+    maxTurns: 25,
   },
   'web-researcher': {
     description: 'Web research agent that searches and extracts information from web pages',

@@ -66,7 +66,7 @@ const DEFAULT_ALLOWED_TOOLS = [
   'TeamCreate', 'TeamDelete', 'SendMessage',
   'TodoWrite', 'ToolSearch', 'Skill',
   'NotebookEdit',
-  'mcp__happyclaw__*'
+  'mcp__*'
 ];
 
 const MEMORY_FLUSH_ALLOWED_TOOLS = [
