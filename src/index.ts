@@ -6431,15 +6431,15 @@ async function ensureDockerRunning(): Promise<void> {
 function buildOnNewChat(
   userId: string,
   homeFolder: string,
-): (chatJid: string, chatName: string) => void {
+): (chatJid: string, chatName: string) => boolean {
   return (chatJid, chatName) => {
     const existing = registeredGroups[chatJid];
     if (existing) {
       // Already owned by this user — nothing to do
-      if (existing.created_by === userId) return;
+      if (existing.created_by === userId) return true;
 
       // Don't override groups with explicit IM routing configured.
-      if (existing.target_agent_id || existing.target_main_jid) return;
+      if (existing.target_agent_id || existing.target_main_jid) return true;
 
       // Backfill missing created_by without changing folder binding.
       // Legacy IM groups may have NULL created_by after migration;
@@ -6452,7 +6452,7 @@ function buildOnNewChat(
           { chatJid, chatName, userId, folder: existing.folder },
           'Backfilled created_by for IM chat (preserved existing folder)',
         );
-        return;
+        return true;
       }
 
       // Different user's connection now owns this IM app.
@@ -6509,7 +6509,7 @@ function buildOnNewChat(
           );
         }
       }
-      return;
+      return true;
     }
     registerGroup(chatJid, {
       name: chatName,
@@ -6521,6 +6521,7 @@ function buildOnNewChat(
       { chatJid, chatName, userId, homeFolder },
       'Auto-registered IM chat',
     );
+    return true;
   };
 }
 
@@ -6546,10 +6547,10 @@ function buildOnBotRemovedFromGroup(): (chatJid: string) => void {
 function buildTelegramBotAddedHandler(
   userId: string,
   homeFolder: string,
-): (chatJid: string, chatName: string) => void {
+): (chatJid: string, chatName: string) => boolean {
   const onNewChat = buildOnNewChat(userId, homeFolder);
   return (chatJid: string, chatName: string) => {
-    onNewChat(chatJid, chatName);
+    const result = onNewChat(chatJid, chatName);
     const welcome =
       `已加入「${chatName}」！当前绑定到默认工作区。\n\n` +
       `/new <名称> — 新建工作区并绑定此群\n` +
@@ -6564,6 +6565,7 @@ function buildTelegramBotAddedHandler(
           'Failed to send Telegram group welcome message',
         ),
       );
+    return result;
   };
 }
 

@@ -3482,6 +3482,8 @@ export interface SystemSettings {
   billingCurrencyRate: number;
   // External Claude directory (admin only)
   externalClaudeDir: string;
+  // IM 新群组自动注册到用户主容器
+  autoRegisterIMChats: boolean;
   // Claude Agent SDK 自动对话压缩触发点（tokens）。0 = 保留 SDK 默认（约 1M）
   autoCompactWindow: number;
 }
@@ -3502,6 +3504,7 @@ const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
   billingCurrency: 'USD',
   billingCurrencyRate: 1,
   externalClaudeDir: '',
+  autoRegisterIMChats: true,
   autoCompactWindow: 0,
 };
 
@@ -3589,6 +3592,10 @@ function readSystemSettingsFromFile(): SystemSettings | null {
       typeof raw.externalClaudeDir === 'string'
         ? raw.externalClaudeDir.trim()
         : DEFAULT_SYSTEM_SETTINGS.externalClaudeDir,
+    autoRegisterIMChats:
+      typeof raw.autoRegisterIMChats === 'boolean'
+        ? raw.autoRegisterIMChats
+        : DEFAULT_SYSTEM_SETTINGS.autoRegisterIMChats,
     autoCompactWindow:
       typeof raw.autoCompactWindow === 'number' && raw.autoCompactWindow >= 0
         ? raw.autoCompactWindow
@@ -3650,6 +3657,8 @@ function buildEnvFallbackSettings(): SystemSettings {
     ),
     externalClaudeDir:
       process.env.EXTERNAL_CLAUDE_DIR || DEFAULT_SYSTEM_SETTINGS.externalClaudeDir,
+    autoRegisterIMChats:
+      process.env.AUTO_REGISTER_IM_CHATS !== 'false',
     autoCompactWindow: parseIntEnv(
       process.env.AUTO_COMPACT_WINDOW,
       DEFAULT_SYSTEM_SETTINGS.autoCompactWindow,

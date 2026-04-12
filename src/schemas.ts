@@ -236,6 +236,7 @@ export const SystemSettingsSchema = z.object({
   billingCurrency: z.string().min(1).max(10).optional(),
   billingCurrencyRate: z.number().min(0.0001).max(1000000).optional(),
   externalClaudeDir: z.string().max(512).optional(),
+  autoRegisterIMChats: z.boolean().optional(),
   autoCompactWindow: z
     .number()
     .int()

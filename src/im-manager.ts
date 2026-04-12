@@ -355,7 +355,7 @@ class IMConnectionManager {
   async connectUserFeishu(
     userId: string,
     config: FeishuConnectConfig,
-    onNewChat: (chatJid: string, chatName: string) => void,
+    onNewChat: (chatJid: string, chatName: string) => boolean,
     options?: ConnectFeishuOptions,
   ): Promise<boolean> {
     if (!config.appId || !config.appSecret) {
@@ -392,7 +392,7 @@ class IMConnectionManager {
   async connectUserTelegram(
     userId: string,
     config: TelegramConnectConfig,
-    onNewChat: (chatJid: string, chatName: string) => void,
+    onNewChat: (chatJid: string, chatName: string) => boolean,
     isChatAuthorized?: (jid: string) => boolean,
     onPairAttempt?: (
       jid: string,
@@ -444,7 +444,7 @@ class IMConnectionManager {
   async connectUserQQ(
     userId: string,
     config: QQConnectConfig,
-    onNewChat: (chatJid: string, chatName: string) => void,
+    onNewChat: (chatJid: string, chatName: string) => boolean,
     isChatAuthorized?: (jid: string) => boolean,
     onPairAttempt?: (
       jid: string,
@@ -502,7 +502,7 @@ class IMConnectionManager {
   async connectUserWeChat(
     userId: string,
     config: WeChatConnectConfig,
-    onNewChat: (chatJid: string, chatName: string) => void,
+    onNewChat: (chatJid: string, chatName: string) => boolean,
     options?: {
       ignoreMessagesBefore?: number;
       onCommand?: (chatJid: string, command: string) => Promise<string | null>;
@@ -549,7 +549,7 @@ class IMConnectionManager {
   async connectUserDingTalk(
     userId: string,
     config: DingTalkConnectConfig,
-    onNewChat: (chatJid: string, chatName: string) => void,
+    onNewChat: (chatJid: string, chatName: string) => boolean,
     options?: {
       ignoreMessagesBefore?: number;
       onCommand?: (chatJid: string, command: string) => Promise<string | null>;
@@ -601,7 +601,7 @@ class IMConnectionManager {
   async connectUserDiscord(
     userId: string,
     config: DiscordConnectConfig,
-    onNewChat: (chatJid: string, chatName: string) => void,
+    onNewChat: (chatJid: string, chatName: string) => boolean,
     options?: {
       ignoreMessagesBefore?: number;
       isChatAuthorized?: (jid: string) => boolean;

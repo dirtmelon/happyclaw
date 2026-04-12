@@ -103,6 +103,7 @@ export interface SystemSettings {
   billingCurrency: string;
   billingCurrencyRate: number;
   externalClaudeDir: string;
+  autoRegisterIMChats: boolean;
   autoCompactWindow: number;
 }
 
