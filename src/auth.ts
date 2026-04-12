@@ -33,27 +33,21 @@ export function signSessionToken(token: string): string {
   return `${token}.${sig}`;
 }
 
-// Legacy unsigned tokens are accepted during a 7-day migration window.
-// After the deadline all unsigned sessions expire; users simply re-login
-// to obtain a new HMAC-signed session token.
-const HMAC_MIGRATION_DEADLINE_MS = new Date('2026-04-12T00:00:00Z').getTime();
-const HMAC_MIGRATION_DEADLINE_ISO = '2026-04-12T00:00:00.000Z';
+// Legacy unsigned tokens are accepted and transparently upgraded to HMAC-signed
+// tokens via a Set-Cookie header on the response. The `needsUpgrade` flag lets
+// the auth middleware know it should re-issue the cookie.
 const warnedLegacyTokens = new Set<string>();
 
 /** Verify and extract the raw token from a signed cookie value. Returns null if invalid. */
 export function verifySessionToken(signedValue: string): string | null {
   const dotIndex = signedValue.lastIndexOf('.');
   if (dotIndex === -1) {
-    // Legacy unsigned token — accept only within migration window
-    if (Date.now() < HMAC_MIGRATION_DEADLINE_MS) {
-      if (!warnedLegacyTokens.has(signedValue)) {
-        warnedLegacyTokens.add(signedValue);
-        logger.warn('Legacy unsigned session token accepted (migration window). Will expire after %s', HMAC_MIGRATION_DEADLINE_ISO);
-      }
-      return signedValue;
+    // Legacy unsigned token — accept and flag for upgrade
+    if (!warnedLegacyTokens.has(signedValue)) {
+      warnedLegacyTokens.add(signedValue);
+      logger.warn('Legacy unsigned session token accepted, will upgrade to HMAC-signed');
     }
-    // Migration window expired — reject unsigned token
-    return null;
+    return signedValue;
   }
   const token = signedValue.substring(0, dotIndex);
   const sig = signedValue.substring(dotIndex + 1);

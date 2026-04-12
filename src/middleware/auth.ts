@@ -3,7 +3,6 @@
 import {
   lastActiveCache,
   LAST_ACTIVE_DEBOUNCE_MS,
-  parseCookie,
   getCachedSessionWithUser,
   invalidateSessionCache,
   type Variables,
@@ -12,28 +11,70 @@ import {
   updateSessionLastActive,
   deleteUserSession,
 } from '../db.js';
-import { isSessionExpired, verifySessionToken } from '../auth.js';
+import { isSessionExpired, verifySessionToken, signSessionToken } from '../auth.js';
 import type { AuthUser, Permission } from '../types.js';
 import { hasPermission } from '../permissions.js';
 import {
   SESSION_COOKIE_NAME_SECURE,
   SESSION_COOKIE_NAME_PLAIN,
 } from '../config.js';
+import { logger } from '../logger.js';
+import { isSecureRequest } from '../utils.js';
+
+/**
+ * Extract ALL values for a given cookie name from the raw Cookie header.
+ * Browsers may send duplicate cookies (same name, different attributes)
+ * when old and new cookies coexist. parseCookie() only keeps one value,
+ * but we need to try all of them to handle migration scenarios.
+ */
+export function getAllCookieValues(cookieHeader: string | undefined, name: string): string[] {
+  if (!cookieHeader) return [];
+  const values: string[] = [];
+  const prefix = name + '=';
+  for (const part of cookieHeader.split(';')) {
+    const trimmed = part.trim();
+    if (trimmed.startsWith(prefix)) {
+      values.push(trimmed.slice(prefix.length));
+    }
+  }
+  return values;
+}
+
+/**
+ * Try to verify a session token from a list of cookie values.
+ * Returns { token, needsUpgrade } where needsUpgrade is true when
+ * an unsigned legacy cookie was accepted.
+ */
+export function tryVerifyAny(values: string[]): { token: string; needsUpgrade: boolean } | null {
+  for (const v of values) {
+    const token = verifySessionToken(v);
+    if (token) {
+      // If the cookie value has no dot, it's an unsigned legacy token
+      const needsUpgrade = !v.includes('.');
+      return { token, needsUpgrade };
+    }
+  }
+  return null;
+}
 
 export const authMiddleware = async (c: any, next: any) => {
-  const cookies = parseCookie(c.req.header('cookie'));
-  // Accept either cookie name — the browser will send whichever was set
-  const rawCookie =
-    cookies[SESSION_COOKIE_NAME_SECURE] || cookies[SESSION_COOKIE_NAME_PLAIN];
-  if (!rawCookie) {
+  const cookieHeader: string | undefined = c.req.header('cookie');
+  // Try both cookie names, preferring the secure variant
+  let allValues = getAllCookieValues(cookieHeader, SESSION_COOKIE_NAME_SECURE);
+  if (allValues.length === 0) {
+    allValues = getAllCookieValues(cookieHeader, SESSION_COOKIE_NAME_PLAIN);
+  }
+
+  if (allValues.length === 0) {
     return c.json({ error: 'Unauthorized' }, 401);
   }
 
-  // Verify HMAC signature (also accepts legacy unsigned tokens for migration)
-  const token = verifySessionToken(rawCookie);
-  if (!token) {
+  const result = tryVerifyAny(allValues);
+  if (!result) {
     return c.json({ error: 'Unauthorized' }, 401);
   }
+
+  const { token, needsUpgrade } = result;
 
   const session = getCachedSessionWithUser(token);
   if (!session) {
@@ -64,6 +105,16 @@ export const authMiddleware = async (c: any, next: any) => {
     must_change_password: session.must_change_password,
   } as AuthUser);
   c.set('sessionId', token);
+
+  // Transparently upgrade unsigned cookie to HMAC-signed
+  if (needsUpgrade) {
+    const secure = isSecureRequest(c);
+    const name = secure ? SESSION_COOKIE_NAME_SECURE : SESSION_COOKIE_NAME_PLAIN;
+    const secureSuffix = secure ? '; Secure' : '';
+    const signedToken = signSessionToken(token);
+    c.header('Set-Cookie', `${name}=${signedToken}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${30 * 24 * 60 * 60}${secureSuffix}`);
+    logger.info('Upgraded unsigned session cookie to HMAC-signed for user %s', session.username);
+  }
 
   const requestPath = c.req.path;
   const canBypassForcedChange =
