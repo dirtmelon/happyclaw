@@ -97,13 +97,13 @@ export interface SystemSettings {
   loginLockoutMinutes: number;
   maxConcurrentScripts: number;
   scriptTimeout: number;
-  autoRegisterIMChats: boolean;
   billingEnabled: boolean;
   billingMode: 'wallet_first';
   billingMinStartBalanceUsd: number;
   billingCurrency: string;
   billingCurrencyRate: number;
   externalClaudeDir: string;
+  autoCompactWindow: number;
 }
 
 // ─── OAuth Usage ────────────────────────────────────────────

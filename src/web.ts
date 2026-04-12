@@ -34,7 +34,11 @@ import {
 } from './schemas.js';
 
 // Middleware
-import { authMiddleware } from './middleware/auth.js';
+import {
+  authMiddleware,
+  getAllCookieValues,
+  tryVerifyAny,
+} from './middleware/auth.js';
 
 // Route modules
 import authRoutes from './routes/auth.js';
@@ -73,7 +77,7 @@ import {
   getUserById,
   updateAgentContextInfo,
 } from './db.js';
-import { isSessionExpired, verifySessionToken } from './auth.js';
+import { isSessionExpired } from './auth.js';
 import type {
   NewMessage,
   WsMessageOut,
@@ -539,21 +543,26 @@ function setupWebSocket(server: any): WebSocketServer {
       return;
     }
 
-    // Verify session cookie (HMAC signature + DB lookup)
-    const cookies = parseCookie(request.headers.cookie);
-    const rawCookie =
-      cookies[SESSION_COOKIE_NAME_SECURE] || cookies[SESSION_COOKIE_NAME_PLAIN];
-    if (!rawCookie) {
+    // Verify session cookie (HMAC signature + DB lookup).
+    // WebSocket upgrade cannot return Set-Cookie, so legacy cookies are
+    // accepted here but upgraded on the next HTTP request instead.
+    const cookieHeader = request.headers.cookie as string | undefined;
+    let allCookieValues = getAllCookieValues(cookieHeader, SESSION_COOKIE_NAME_SECURE);
+    if (allCookieValues.length === 0) {
+      allCookieValues = getAllCookieValues(cookieHeader, SESSION_COOKIE_NAME_PLAIN);
+    }
+    if (allCookieValues.length === 0) {
       socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
       socket.destroy();
       return;
     }
-    const token = verifySessionToken(rawCookie);
-    if (!token) {
+    const verifyResult = tryVerifyAny(allCookieValues);
+    if (!verifyResult) {
       socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
       socket.destroy();
       return;
     }
+    const token = verifyResult.token;
 
     const session = getCachedSessionWithUser(token);
     if (!session) {

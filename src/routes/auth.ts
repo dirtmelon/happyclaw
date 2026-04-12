@@ -41,7 +41,6 @@ import {
   verifyPassword,
   hashPassword,
   generateSessionToken,
-  signSessionToken,
   sessionExpiresAt,
   checkLoginRateLimit,
   recordLoginAttempt,
@@ -53,51 +52,15 @@ import {
 import type { AuthUser, User, UserPublic } from '../types.js';
 import { logger } from '../logger.js';
 import { lastActiveCache, invalidateSessionCache, invalidateUserSessions } from '../web-context.js';
-import {
-  SESSION_COOKIE_NAME_SECURE,
-  SESSION_COOKIE_NAME_PLAIN,
-  TRUST_PROXY,
-} from '../config.js';
 import { getSystemSettings } from '../runtime-config.js';
 
 const authRoutes = new Hono<{ Variables: Variables }>();
 
 // --- Helper Functions ---
 
-/** Detect if the current request arrived over HTTPS (direct or behind proxy) */
-function isSecureRequest(c: any): boolean {
-  if (TRUST_PROXY) {
-    const proto = c.req.header('x-forwarded-proto');
-    if (proto === 'https') return true;
-  }
-  // Hono / node-server: URL scheme
-  try {
-    const url = new URL(c.req.url, 'http://localhost');
-    if (url.protocol === 'https:') return true;
-  } catch {
-    /* ignore */
-  }
-  return false;
-}
-
-function getSessionCookieName(secure: boolean): string {
-  return secure ? SESSION_COOKIE_NAME_SECURE : SESSION_COOKIE_NAME_PLAIN;
-}
-
-export function setSessionCookie(c: any, token: string): string {
-  const secure = isSecureRequest(c);
-  const name = getSessionCookieName(secure);
-  const secureSuffix = secure ? '; Secure' : '';
-  const signedToken = signSessionToken(token);
-  return `${name}=${signedToken}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${30 * 24 * 60 * 60}${secureSuffix}`;
-}
-
-export function clearSessionCookie(c: any): string {
-  const secure = isSecureRequest(c);
-  const name = getSessionCookieName(secure);
-  const secureSuffix = secure ? '; Secure' : '';
-  return `${name}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${secureSuffix}`;
-}
+// Cookie helpers live in auth.ts (single source of truth, also used by middleware).
+import { setSessionCookie, clearSessionCookie } from '../auth.js';
+export { setSessionCookie, clearSessionCookie };
 
 export function isUsernameConflictError(err: unknown): boolean {
   return (

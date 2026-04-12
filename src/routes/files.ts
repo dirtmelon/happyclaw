@@ -38,6 +38,8 @@ const MIME_MAP: Record<string, string> = {
   gif: 'image/gif',
   svg: 'image/svg+xml',
   webp: 'image/webp',
+  bmp: 'image/bmp',
+  ico: 'image/x-icon',
   // 文本和代码
   txt: 'text/plain',
   md: 'text/markdown',
@@ -66,6 +68,19 @@ const MIME_MAP: Record<string, string> = {
   csv: 'text/csv',
   // PDF
   pdf: 'application/pdf',
+  // 视频
+  mp4: 'video/mp4',
+  webm: 'video/webm',
+  mov: 'video/quicktime',
+  avi: 'video/x-msvideo',
+  mkv: 'video/x-matroska',
+  // 音频
+  mp3: 'audio/mpeg',
+  wav: 'audio/wav',
+  ogg: 'audio/ogg',
+  aac: 'audio/aac',
+  m4a: 'audio/mp4',
+  flac: 'audio/flac',
   // 压缩文件
   zip: 'application/zip',
   tar: 'application/x-tar',
@@ -103,31 +118,15 @@ const TEXT_EXTENSIONS = new Set([
   'svg',
 ]);
 
-// 允许 inline 预览的安全 MIME 类型（排除 HTML 和 SVG 以防止 XSS）
-const SAFE_PREVIEW_MIME_TYPES = new Set([
-  'image/png',
-  'image/jpeg',
-  'image/gif',
-  'image/webp',
-  'text/plain',
-  'text/markdown',
-  'text/css',
-  'text/csv',
-  'text/yaml',
-  'text/x-python',
-  'text/x-go',
-  'text/x-rust',
-  'text/x-java',
-  'text/x-c',
-  'text/x-c++',
-  'text/x-sh',
-  'text/x-toml',
-  'text/javascript',
-  'text/typescript',
-  'application/json',
-  'application/xml',
-  'application/pdf',
-]);
+// 不安全的扩展名（HTML/SVG 有 XSS 风险，压缩包不可预览）
+const UNSAFE_PREVIEW_EXTENSIONS = new Set(['html', 'svg', 'zip', 'tar', 'gz', '7z']);
+
+// 允许 inline 预览的安全 MIME 类型（从 MIME_MAP 中排除不安全扩展名自动推导）
+const SAFE_PREVIEW_MIME_TYPES = new Set(
+  Object.entries(MIME_MAP)
+    .filter(([ext]) => !UNSAFE_PREVIEW_EXTENSIONS.has(ext))
+    .map(([, mime]) => mime),
+);
 
 /**
  * 获取文件操作的根目录覆盖。
@@ -555,29 +554,98 @@ fileRoutes.get('/:jid/files/preview/:path', authMiddleware, (c) => {
     // 检测 MIME 类型（基于扩展名）
     const ext = path.extname(absolutePath).slice(1).toLowerCase();
     const mimeType = MIME_MAP[ext] || 'application/octet-stream';
-
-    // 读取文件并返回
-    const fileContent = fs.readFileSync(absolutePath);
     const fileName = path.basename(absolutePath);
+    const fileSize = stats.size;
 
-    // 安全头：始终添加 CSP sandbox 和 nosniff
-    c.header('Content-Security-Policy', "default-src 'none'; sandbox");
-    c.header('X-Content-Type-Options', 'nosniff');
+    // 判断是否为流媒体类型（视频/音频），需支持 Range 请求
+    const isStreamable =
+      mimeType.startsWith('video/') || mimeType.startsWith('audio/');
 
+    // 安全头
+    const securityHeaders: Record<string, string> = {
+      'Content-Security-Policy': "default-src 'none'; sandbox",
+      'X-Content-Type-Options': 'nosniff',
+    };
+
+    // Content-Type 和 Content-Disposition
+    let contentType: string;
+    let disposition: string;
     if (SAFE_PREVIEW_MIME_TYPES.has(mimeType)) {
-      // 安全类型：允许 inline 预览
-      c.header('Content-Type', mimeType);
-      c.header('Content-Disposition', 'inline');
+      contentType = mimeType;
+      disposition = 'inline';
     } else {
-      // 不安全类型（HTML、SVG 等）：强制下载
-      c.header('Content-Type', 'application/octet-stream');
-      c.header(
-        'Content-Disposition',
-        `attachment; filename="${encodeURIComponent(fileName)}"`,
-      );
+      contentType = 'application/octet-stream';
+      disposition = `attachment; filename="${encodeURIComponent(fileName)}"`;
     }
 
-    return c.body(fileContent);
+    const commonHeaders = {
+      ...securityHeaders,
+      'Content-Type': contentType,
+      'Content-Disposition': disposition,
+    };
+
+    // 流媒体类型：支持 Range 请求（浏览器 <video>/<audio> seek 依赖此机制）
+    if (isStreamable) {
+      const rangeHeader = c.req.header('range');
+      if (rangeHeader) {
+        const normalizedRange = rangeHeader.trim();
+        const isBytesRange =
+          normalizedRange.toLowerCase().startsWith('bytes=');
+        const isMultiRange = isBytesRange && normalizedRange.includes(',');
+
+        if (isBytesRange && !isMultiRange) {
+          const parsedRange = parseSingleRange(normalizedRange, fileSize);
+          if (!parsedRange) {
+            return new Response(null, {
+              status: 416,
+              headers: {
+                ...commonHeaders,
+                'Content-Range': `bytes */${fileSize}`,
+              },
+            });
+          }
+
+          const { start, end } = parsedRange;
+          const stream = Readable.toWeb(
+            fs.createReadStream(absolutePath, { start, end }),
+          ) as ReadableStream<Uint8Array>;
+          return new Response(stream, {
+            status: 206,
+            headers: {
+              ...commonHeaders,
+              'Accept-Ranges': 'bytes',
+              'Content-Length': String(end - start + 1),
+              'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+            },
+          });
+        }
+      }
+
+      // 无 Range 或多区间回退：流式返回完整文件
+      const stream = Readable.toWeb(
+        fs.createReadStream(absolutePath),
+      ) as ReadableStream<Uint8Array>;
+      return new Response(stream, {
+        status: 200,
+        headers: {
+          ...commonHeaders,
+          'Accept-Ranges': 'bytes',
+          'Content-Length': String(fileSize),
+        },
+      });
+    }
+
+    // 非流媒体类型：也使用流式响应避免大文件占满内存
+    const stream = Readable.toWeb(
+      fs.createReadStream(absolutePath),
+    ) as ReadableStream<Uint8Array>;
+    return new Response(stream, {
+      status: 200,
+      headers: {
+        ...commonHeaders,
+        'Content-Length': String(fileSize),
+      },
+    });
   } catch (error) {
     logger.error({ err: error }, `Failed to preview file for ${jid}`);
     return c.json({ error: 'Failed to preview file' }, 500);

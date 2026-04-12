@@ -18,6 +18,7 @@ import {
   isDockerAvailable,
   updateWeChatNoProxy,
 } from './config.js';
+import { detectImageMimeType } from './image-detector.js';
 import { interruptibleSleep } from './message-notifier.js';
 import {
   AvailableGroup,
@@ -122,6 +123,7 @@ import {
   getUserQQConfig,
   getUserWeChatConfig,
   getUserDingTalkConfig,
+  getUserDiscordConfig,
   getSystemSettings,
   saveUserFeishuConfig,
   saveUserTelegramConfig,
@@ -133,6 +135,7 @@ import type {
   QQConnectConfig,
   WeChatConnectConfig,
   DingTalkConnectConfig,
+  DiscordConnectConfig,
 } from './im-manager.js';
 import { GroupQueue } from './group-queue.js';
 import { startSchedulerLoop, triggerTaskNow } from './task-scheduler.js';
@@ -471,7 +474,7 @@ const queue = new GroupQueue();
 const EMPTY_CURSOR: MessageCursor = { timestamp: '', id: '' };
 const terminalWarmupInFlight = new Set<string>();
 const STUCK_RUNNER_CHECK_INTERVAL_POLLS = 15;
-const STUCK_RUNNER_IDLE_MS = 6 * 60 * 1000;
+const STUCK_RUNNER_IDLE_MS = 3 * 60 * 1000;
 let stuckRunnerCheckCounter = 0;
 
 // OOM auto-recovery: track consecutive OOM (exit code 137) exits per folder.
@@ -512,6 +515,36 @@ const RELATIVE_IMAGE_EXTENSIONS = new Set([
   '.svg',
 ]);
 const FEISHU_THREAD_TITLE_MAX_LEN = 48;
+
+/**
+ * Resolve the IM JID that send_image / send_file / other media MCP tools
+ * should target. Three cases:
+ * - Conversation agent: use the agent-bound route map (IM channel the
+ *   conversation agent was started on).
+ * - Home container: prefer the route map because ctx.chatJid is frozen to
+ *   the first IM source, while the home container serves multiple channels
+ *   concurrently. Fall back to chatJid if it's an IM JID.
+ * - Regular group: prefer chatJid when it's an IM JID, fall back to the
+ *   route map.
+ */
+function resolveImRoute(opts: {
+  ipcAgentId: string | null | undefined;
+  isHome: boolean;
+  chatJid: string;
+  sourceGroup: string;
+}): string | null {
+  const { ipcAgentId, isHome, chatJid, sourceGroup } = opts;
+  if (ipcAgentId) {
+    return (
+      activeImReplyRoutes.get(`${chatJid}#agent:${ipcAgentId}`) ??
+      activeImReplyRoutes.get(sourceGroup) ??
+      null
+    );
+  }
+  const imFromJid = getChannelType(chatJid) !== null ? chatJid : null;
+  const imFromGroup = activeImReplyRoutes.get(sourceGroup) ?? null;
+  return isHome ? (imFromGroup ?? imFromJid) : (imFromJid ?? imFromGroup);
+}
 
 /** Unbind an IM group from its conversation agent or main conversation, syncing DB + in-memory cache + failure counters. */
 function unbindImGroup(jid: string, reason: string): void {
@@ -2315,8 +2348,14 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         const role = m.is_from_me ? 'assistant' : m.sender_name;
         const truncated =
           m.content.length > 500 ? m.content.slice(0, 500) + '…' : m.content;
-        // Strip lone surrogates to avoid API JSON errors
-        const cleaned = truncated.replace(/[\uD800-\uDFFF]/g, '');
+        // Strip lone (unpaired) surrogates while preserving valid surrogate pairs
+        // such as emoji. Must stay byte-for-byte aligned with the matching regex
+        // in container/agent-runner/src/index.ts:extractSessionHistory — both
+        // sides feed the same Anthropic API and must produce identical strings.
+        const cleaned = truncated.replace(
+          /(?:[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF])/g,
+          '',
+        );
         return `[${role}] ${cleaned}`;
       });
       prompt =
@@ -2918,6 +2957,32 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
               // Previously only rebuilt for partial outputs (#223); now rebuild for
               // all completions to fix DingTalk "second message gets no reply" bug.
               if (streamingCardHandledIM) {
+                // Streaming card strips local image references (only img_xxx keys
+                // are valid in Feishu cards).  Send any local images as separate
+                // messages so they are not silently lost.
+                if (localImagePaths.length > 0 && replySourceImJid) {
+                  for (const imgPath of localImagePaths) {
+                    try {
+                      const imgBuf = await fs.promises.readFile(imgPath);
+                      const mimeType = detectImageMimeType(imgBuf);
+                      await imManager.sendImage(
+                        replySourceImJid,
+                        imgBuf,
+                        mimeType,
+                      );
+                      logger.info(
+                        { chatJid, imgPath },
+                        'Sent local image after streaming card completion',
+                      );
+                    } catch (imgErr) {
+                      logger.warn(
+                        { chatJid, imgPath, err: imgErr },
+                        'Failed to send local image after streaming card',
+                      );
+                    }
+                  }
+                }
+
                 unregisterStreamingSession(streamingSessionJid);
                 streamingAccumulatedText = '';
                 streamingAccumulatedThinking = '';
@@ -4170,17 +4235,12 @@ function startIpcWatcher(): void {
                   const caption = data.caption || undefined;
                   const fileName = data.fileName || undefined;
 
-                  // For conversation agents, use activeImReplyRoutes (the IM
-                  // channel this conversation agent is bound to — e.g. DingTalk JID).
-                  const imgImRoute = ipcAgentId
-                    ? (activeImReplyRoutes.get(
-                        `${data.chatJid}#agent:${ipcAgentId}`,
-                      ) ??
-                      activeImReplyRoutes.get(sourceGroup) ??
-                      null)
-                    : getChannelType(data.chatJid) !== null
-                      ? data.chatJid
-                      : (activeImReplyRoutes.get(sourceGroup) ?? null);
+                  const imgImRoute = resolveImRoute({
+                    ipcAgentId,
+                    isHome,
+                    chatJid: data.chatJid,
+                    sourceGroup,
+                  });
                   if (imgImRoute) {
                     const sent = await retryImOperation(
                       'send_image',
@@ -4797,7 +4857,6 @@ async function processTaskIpc(
           containerConfig: data.containerConfig,
           created_by: sourceEntry?.created_by,
           executionMode: execMode,
-          require_mention: true,
         });
       } else {
         logger.warn(
@@ -5026,15 +5085,12 @@ async function processTaskIpc(
             }
           }
 
-          // Route to IM: for conversation agents, use activeImReplyRoutes (the IM
-          // channel this conversation agent is bound to — e.g. DingTalk group JID).
-          const fileImRoute = ipcAgentId
-            ? (activeImReplyRoutes.get(`${data.chatJid}#agent:${ipcAgentId}`) ??
-              activeImReplyRoutes.get(sourceGroup) ??
-              null)
-            : getChannelType(data.chatJid) !== null
-              ? data.chatJid
-              : (activeImReplyRoutes.get(sourceGroup) ?? null);
+          const fileImRoute = resolveImRoute({
+            ipcAgentId,
+            isHome,
+            chatJid: data.chatJid,
+            sourceGroup,
+          });
           if (fileImRoute) {
             const imFileName = data.fileName || path.basename(resolvedPath);
             const sent = await retryImOperation('send_file', fileImRoute, () =>
@@ -6076,16 +6132,70 @@ async function startMessageLoop(): Promise<void> {
     stuckRunnerCheckCounter++;
     if (stuckRunnerCheckCounter >= STUCK_RUNNER_CHECK_INTERVAL_POLLS) {
       stuckRunnerCheckCounter = 0;
-      recoverStuckPendingGroups();
+      await recoverStuckPendingGroups();
     }
 
     await interruptibleSleep(POLL_INTERVAL);
   }
 }
 
-function recoverStuckPendingGroups(): void {
+/**
+ * Check if a process tree has actively working descendant processes.
+ * Returns true if any descendant (not just direct children) is consuming
+ * CPU (> 0.5%), indicating real work rather than a network-blocked hang.
+ */
+async function hasActiveCpuDescendants(pid: number): Promise<boolean> {
+  const execFileAsync = promisify(execFile);
+  try {
+    const { stdout } = await execFileAsync(
+      'ps',
+      ['-eo', 'pid=,ppid=,pcpu='],
+      { timeout: 3000 },
+    );
+
+    const children = new Map<number, number[]>();
+    const cpuByPid = new Map<number, number>();
+    for (const line of stdout.trim().split('\n')) {
+      const parts = line.trim().split(/\s+/);
+      if (parts.length < 3) continue;
+      const p = parseInt(parts[0], 10);
+      const pp = parseInt(parts[1], 10);
+      const cpu = parseFloat(parts[2]);
+      if (isNaN(p) || isNaN(pp)) continue;
+      if (!children.has(pp)) children.set(pp, []);
+      children.get(pp)!.push(p);
+      cpuByPid.set(p, cpu);
+    }
+
+    // Walk the full descendant tree (not just direct children)
+    const stack = [pid];
+    while (stack.length > 0) {
+      const current = stack.pop()!;
+      const kids = children.get(current);
+      if (!kids) continue;
+      for (const kid of kids) {
+        if ((cpuByPid.get(kid) ?? 0) > 0.5) return true;
+        stack.push(kid);
+      }
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+async function recoverStuckPendingGroups(): Promise<void> {
   const stuckGroups = queue.getStuckPendingGroups(STUCK_RUNNER_IDLE_MS);
   for (const { jid, idleMs } of stuckGroups) {
+    const pid = queue.getRunnerPid(jid);
+    if (pid && (await hasActiveCpuDescendants(pid))) {
+      logger.info(
+        { chatJid: jid, idleMs, pid },
+        'Runner idle but has CPU-active child processes; skipping restart',
+      );
+      continue;
+    }
+
     logger.warn(
       { chatJid: jid, idleMs },
       'Runner has pending messages but no activity; restarting',
@@ -6321,15 +6431,15 @@ async function ensureDockerRunning(): Promise<void> {
 function buildOnNewChat(
   userId: string,
   homeFolder: string,
-): (chatJid: string, chatName: string) => boolean {
+): (chatJid: string, chatName: string) => void {
   return (chatJid, chatName) => {
     const existing = registeredGroups[chatJid];
     if (existing) {
       // Already owned by this user — nothing to do
-      if (existing.created_by === userId) return true;
+      if (existing.created_by === userId) return;
 
       // Don't override groups with explicit IM routing configured.
-      if (existing.target_agent_id || existing.target_main_jid) return true;
+      if (existing.target_agent_id || existing.target_main_jid) return;
 
       // Backfill missing created_by without changing folder binding.
       // Legacy IM groups may have NULL created_by after migration;
@@ -6342,7 +6452,7 @@ function buildOnNewChat(
           { chatJid, chatName, userId, folder: existing.folder },
           'Backfilled created_by for IM chat (preserved existing folder)',
         );
-        return true;
+        return;
       }
 
       // Different user's connection now owns this IM app.
@@ -6399,31 +6509,18 @@ function buildOnNewChat(
           );
         }
       }
-      return true;
+      return;
     }
-
-    // Check if auto-registration is enabled
-    const { autoRegisterIMChats } = getSystemSettings();
-    if (!autoRegisterIMChats) {
-      logger.info(
-        { chatJid, chatName, userId },
-        'Rejected new IM chat: autoRegisterIMChats is disabled',
-      );
-      return false;
-    }
-
     registerGroup(chatJid, {
       name: chatName,
       folder: homeFolder,
       added_at: new Date().toISOString(),
       created_by: userId,
-      require_mention: true,
     });
     logger.info(
       { chatJid, chatName, userId, homeFolder },
       'Auto-registered IM chat',
     );
-    return true;
   };
 }
 
@@ -6878,6 +6975,7 @@ async function connectUserIMChannels(
   qqConfig?: QQConnectConfig | null,
   wechatConfig?: WeChatConnectConfig | null,
   dingtalkConfig?: DingTalkConnectConfig | null,
+  discordConfig?: DiscordConnectConfig | null,
   ignoreMessagesBefore?: number,
 ): Promise<{
   feishu: boolean;
@@ -6885,6 +6983,7 @@ async function connectUserIMChannels(
   qq: boolean;
   wechat: boolean;
   dingtalk: boolean;
+  discord: boolean;
 }> {
   const onNewChat = buildOnNewChat(userId, homeFolder);
   const resolveGroupFolder = (chatJid: string): string | undefined => {
@@ -6895,126 +6994,127 @@ async function connectUserIMChannels(
   const onBotAddedToGroup = buildOnNewChat(userId, homeFolder); // reuse same logic: auto-register
   const onBotRemovedFromGroup = buildOnBotRemovedFromGroup();
 
-  let feishu = false;
-  let telegram = false;
-  let qq = false;
-  let wechat = false;
-  let dingtalk = false;
-
-  if (
+  // 各渠道互相独立，并发连接避免启动时延 N×M 累加
+  const feishuTask =
     feishuConfig &&
     feishuConfig.enabled !== false &&
     feishuConfig.appId &&
     feishuConfig.appSecret
-  ) {
-    feishu = await imManager.connectUserFeishu(
-      userId,
-      feishuConfig,
-      onNewChat,
-      {
-        ignoreMessagesBefore,
-        onCommand: handleCommand,
-        resolveGroupFolder,
-        resolveEffectiveChatJid,
-        onAgentMessage,
-        onBotAddedToGroup,
-        onBotRemovedFromGroup,
-        shouldProcessGroupMessage,
-        isGroupOwnerMessage,
-        onCardInterrupt: handleCardInterrupt,
-      },
-    );
-  }
+      ? imManager.connectUserFeishu(userId, feishuConfig, onNewChat, {
+          ignoreMessagesBefore,
+          onCommand: handleCommand,
+          resolveGroupFolder,
+          resolveEffectiveChatJid,
+          onAgentMessage,
+          onBotAddedToGroup,
+          onBotRemovedFromGroup,
+          shouldProcessGroupMessage,
+          isGroupOwnerMessage,
+          onCardInterrupt: handleCardInterrupt,
+        })
+      : Promise.resolve(false);
 
-  if (
+  const telegramTask =
     telegramConfig &&
     telegramConfig.enabled !== false &&
     telegramConfig.botToken
-  ) {
-    telegram = await imManager.connectUserTelegram(
-      userId,
-      telegramConfig,
-      onNewChat,
-      buildIsChatAuthorized(userId),
-      buildOnPairAttempt(userId),
-      {
-        onCommand: handleCommand,
-        ignoreMessagesBefore,
-        resolveGroupFolder,
-        resolveEffectiveChatJid,
-        onAgentMessage,
-        onBotAddedToGroup: buildTelegramBotAddedHandler(userId, homeFolder),
-        onBotRemovedFromGroup,
-      },
-    );
-  }
+      ? imManager.connectUserTelegram(
+          userId,
+          telegramConfig,
+          onNewChat,
+          buildIsChatAuthorized(userId),
+          buildOnPairAttempt(userId),
+          {
+            onCommand: handleCommand,
+            ignoreMessagesBefore,
+            resolveGroupFolder,
+            resolveEffectiveChatJid,
+            onAgentMessage,
+            onBotAddedToGroup: buildTelegramBotAddedHandler(userId, homeFolder),
+            onBotRemovedFromGroup,
+          },
+        )
+      : Promise.resolve(false);
 
-  if (
+  const qqTask =
     qqConfig &&
     qqConfig.enabled !== false &&
     qqConfig.appId &&
     qqConfig.appSecret
-  ) {
-    qq = await imManager.connectUserQQ(
-      userId,
-      qqConfig,
-      onNewChat,
-      buildIsChatAuthorized(userId),
-      buildOnPairAttempt(userId),
-      {
-        onCommand: handleCommand,
-        resolveGroupFolder,
-        resolveEffectiveChatJid,
-        onAgentMessage,
-      },
-    );
-  }
+      ? imManager.connectUserQQ(
+          userId,
+          qqConfig,
+          onNewChat,
+          buildIsChatAuthorized(userId),
+          buildOnPairAttempt(userId),
+          {
+            onCommand: handleCommand,
+            resolveGroupFolder,
+            resolveEffectiveChatJid,
+            onAgentMessage,
+          },
+        )
+      : Promise.resolve(false);
 
-  if (
+  const wechatTask =
     wechatConfig &&
     wechatConfig.enabled !== false &&
     wechatConfig.botToken &&
     wechatConfig.ilinkBotId
-  ) {
-    wechat = await imManager.connectUserWeChat(
-      userId,
-      wechatConfig,
-      onNewChat,
-      {
-        ignoreMessagesBefore,
-        onCommand: handleCommand,
-        resolveGroupFolder,
-        resolveEffectiveChatJid,
-        onAgentMessage,
-      },
-    );
-  }
+      ? imManager.connectUserWeChat(userId, wechatConfig, onNewChat, {
+          ignoreMessagesBefore,
+          onCommand: handleCommand,
+          resolveGroupFolder,
+          resolveEffectiveChatJid,
+          onAgentMessage,
+        })
+      : Promise.resolve(false);
 
-  if (
+  const dingtalkTask =
     dingtalkConfig &&
     dingtalkConfig.enabled !== false &&
     dingtalkConfig.clientId &&
     dingtalkConfig.clientSecret
-  ) {
-    dingtalk = await imManager.connectUserDingTalk(
-      userId,
-      dingtalkConfig,
-      onNewChat,
-      {
-        ignoreMessagesBefore,
-        onCommand: handleCommand,
-        resolveGroupFolder,
-        resolveEffectiveChatJid,
-        onAgentMessage,
-        onBotAddedToGroup,
-        onBotRemovedFromGroup,
-        shouldProcessGroupMessage,
-        isGroupOwnerMessage,
-      },
-    );
-  }
+      ? imManager.connectUserDingTalk(userId, dingtalkConfig, onNewChat, {
+          ignoreMessagesBefore,
+          onCommand: handleCommand,
+          resolveGroupFolder,
+          resolveEffectiveChatJid,
+          onAgentMessage,
+          onBotAddedToGroup,
+          onBotRemovedFromGroup,
+          shouldProcessGroupMessage,
+          isGroupOwnerMessage,
+        })
+      : Promise.resolve(false);
 
-  return { feishu, telegram, qq, wechat, dingtalk };
+  const discordTask =
+    discordConfig &&
+    discordConfig.enabled !== false &&
+    discordConfig.botToken
+      ? imManager.connectUserDiscord(userId, discordConfig, onNewChat, {
+          ignoreMessagesBefore,
+          onCommand: handleCommand,
+          resolveGroupFolder,
+          resolveEffectiveChatJid,
+          onAgentMessage,
+          onBotAddedToGroup,
+          onBotRemovedFromGroup,
+          shouldProcessGroupMessage,
+          isGroupOwnerMessage,
+        })
+      : Promise.resolve(false);
+
+  const [feishu, telegram, qq, wechat, dingtalk, discord] = await Promise.all([
+    feishuTask,
+    telegramTask,
+    qqTask,
+    wechatTask,
+    dingtalkTask,
+    discordTask,
+  ]);
+
+  return { feishu, telegram, qq, wechat, dingtalk, discord };
 }
 
 function movePathWithFallback(src: string, dst: string): void {
@@ -7420,7 +7520,7 @@ async function main(): Promise<void> {
   // Reload a per-user IM channel (hot-reload on user-im config save)
   const reloadUserIMConfig = async (
     userId: string,
-    channel: 'feishu' | 'telegram' | 'qq' | 'wechat' | 'dingtalk',
+    channel: 'feishu' | 'telegram' | 'qq' | 'wechat' | 'dingtalk' | 'discord',
   ): Promise<boolean> => {
     const homeGroup = getUserHomeGroup(userId);
     if (!homeGroup) {
@@ -7560,6 +7660,35 @@ async function main(): Promise<void> {
       }
       logger.info({ userId }, 'User DingTalk channel disabled via hot-reload');
       return false;
+    } else if (channel === 'discord') {
+      await imManager.disconnectUserDiscord(userId);
+      const config = getUserDiscordConfig(userId);
+      if (config && config.enabled !== false && config.botToken) {
+        const connected = await imManager.connectUserDiscord(
+          userId,
+          config,
+          onNewChat,
+          {
+            ignoreMessagesBefore,
+            onCommand: handleCommand,
+            resolveGroupFolder: (chatJid: string) =>
+              resolveEffectiveFolder(chatJid),
+            resolveEffectiveChatJid: buildResolveEffectiveChatJid(),
+            onAgentMessage: buildOnAgentMessage(),
+            onBotAddedToGroup: buildOnNewChat(userId, homeFolder),
+            onBotRemovedFromGroup: buildOnBotRemovedFromGroup(),
+            shouldProcessGroupMessage,
+            isGroupOwnerMessage,
+          },
+        );
+        logger.info(
+          { userId, connected },
+          'User Discord connection hot-reloaded',
+        );
+        return connected;
+      }
+      logger.info({ userId }, 'User Discord channel disabled via hot-reload');
+      return false;
     } else {
       // WeChat
       await imManager.disconnectUserWeChat(userId);
@@ -7630,6 +7759,8 @@ async function main(): Promise<void> {
       imManager.isWeChatConnected(userId),
     isUserDingTalkConnected: (userId: string) =>
       imManager.isDingTalkConnected(userId),
+    isUserDiscordConnected: (userId: string) =>
+      imManager.isDiscordConnected(userId),
     processAgentConversation,
     getFeishuChatInfo: (userId: string, chatId: string) =>
       imManager.getFeishuChatInfo(userId, chatId),
@@ -7951,6 +8082,7 @@ async function main(): Promise<void> {
     const userQQ = getUserQQConfig(user.id);
     const userWeChat = getUserWeChatConfig(user.id);
     const userDingTalk = getUserDingTalkConfig(user.id);
+    const userDiscord = getUserDiscordConfig(user.id);
 
     // Determine effective Feishu config: per-user > global (admin only)
     let effectiveFeishu: FeishuConnectConfig | null = null;
@@ -8022,12 +8154,23 @@ async function main(): Promise<void> {
       };
     }
 
+    // Determine effective Discord config: per-user only (no global fallback)
+    let effectiveDiscord: DiscordConnectConfig | null = null;
+    if (userDiscord && userDiscord.botToken) {
+      effectiveDiscord = {
+        botToken: userDiscord.botToken,
+        enabled: userDiscord.enabled,
+        streamingMode: userDiscord.streamingMode,
+      };
+    }
+
     if (
       !effectiveFeishu &&
       !effectiveTelegram &&
       !effectiveQQ &&
       !effectiveWeChat &&
-      !effectiveDingTalk
+      !effectiveDingTalk &&
+      !effectiveDiscord
     )
       continue;
 
@@ -8040,6 +8183,7 @@ async function main(): Promise<void> {
         effectiveQQ,
         effectiveWeChat,
         effectiveDingTalk,
+        effectiveDiscord,
         Date.now(),
       );
       if (result.feishu) anyFeishuConnected = true;
@@ -8051,6 +8195,7 @@ async function main(): Promise<void> {
           qq: result.qq,
           wechat: result.wechat,
           dingtalk: result.dingtalk,
+          discord: result.discord,
         },
         'User IM channels connected',
       );

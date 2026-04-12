@@ -19,15 +19,24 @@ import {
   Loader2,
   Eye,
   FileEdit,
+  Film,
+  Music,
+  AlertCircle,
 } from 'lucide-react';
 import { useFileStore, FileEntry, toBase64Url } from '../../stores/files';
 import { useChatStore } from '../../stores/chat';
 import { useAuthStore } from '../../stores/auth';
+import { useEscapeKey } from '../../hooks/useEscapeKey';
 import { api } from '../../api/client';
 import { withBasePath } from '../../utils/url';
 import { downloadFromUrl } from '../../utils/download';
 import { showToast } from '../../utils/toast';
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 import { ConfirmDialog } from '@/components/common/ConfirmDialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -45,23 +54,81 @@ interface FilePanelProps {
 // ─── File type constants ─────────────────────────────────────────
 
 const IMAGE_EXTENSIONS = new Set([
-  'png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'bmp', 'ico',
+  'png',
+  'jpg',
+  'jpeg',
+  'gif',
+  'svg',
+  'webp',
+  'bmp',
+  'ico',
 ]);
 
 const TEXT_EXTENSIONS = new Set([
-  'txt', 'md', 'json', 'js', 'ts', 'jsx', 'tsx', 'css', 'html', 'xml',
-  'py', 'go', 'rs', 'java', 'c', 'cpp', 'h', 'sh', 'yaml', 'yml',
-  'toml', 'ini', 'conf', 'log', 'csv', 'svg',
+  'txt',
+  'md',
+  'json',
+  'js',
+  'ts',
+  'jsx',
+  'tsx',
+  'css',
+  'html',
+  'xml',
+  'py',
+  'go',
+  'rs',
+  'java',
+  'c',
+  'cpp',
+  'h',
+  'sh',
+  'yaml',
+  'yml',
+  'toml',
+  'ini',
+  'conf',
+  'log',
+  'csv',
+  'svg',
 ]);
 
 const CODE_EXTENSIONS = new Set([
-  'js', 'ts', 'jsx', 'tsx', 'py', 'go', 'rs', 'java', 'c', 'cpp', 'h',
-  'sh', 'css', 'html', 'xml', 'yaml', 'yml', 'toml',
+  'js',
+  'ts',
+  'jsx',
+  'tsx',
+  'py',
+  'go',
+  'rs',
+  'java',
+  'c',
+  'cpp',
+  'h',
+  'sh',
+  'css',
+  'html',
+  'xml',
+  'yaml',
+  'yml',
+  'toml',
 ]);
 
 const ARCHIVE_EXTENSIONS = new Set([
-  'zip', 'tar', 'gz', '7z', 'rar', 'bz2', 'xz',
+  'zip',
+  'tar',
+  'gz',
+  '7z',
+  'rar',
+  'bz2',
+  'xz',
 ]);
+
+const PDF_EXTENSIONS = new Set(['pdf']);
+
+const VIDEO_EXTENSIONS = new Set(['mp4', 'webm', 'mov', 'avi', 'mkv']);
+
+const AUDIO_EXTENSIONS = new Set(['mp3', 'wav', 'ogg', 'aac', 'm4a', 'flac']);
 
 // ─── File icon component ────────────────────────────────────────
 
@@ -70,14 +137,15 @@ function FileIcon({ name }: { name: string }) {
 
   if (IMAGE_EXTENSIONS.has(ext))
     return <Image className="w-4 h-4 text-pink-500" />;
+  if (VIDEO_EXTENSIONS.has(ext))
+    return <Film className="w-4 h-4 text-purple-500" />;
+  if (AUDIO_EXTENSIONS.has(ext))
+    return <Music className="w-4 h-4 text-cyan-500" />;
   if (ARCHIVE_EXTENSIONS.has(ext))
     return <Package className="w-4 h-4 text-amber-500" />;
-  if (ext === 'pdf')
-    return <FileText className="w-4 h-4 text-red-500" />;
-  if (ext === 'json')
-    return <FileCode className="w-4 h-4 text-yellow-600" />;
-  if (ext === 'md')
-    return <FileText className="w-4 h-4 text-blue-500" />;
+  if (ext === 'pdf') return <FileText className="w-4 h-4 text-red-500" />;
+  if (ext === 'json') return <FileCode className="w-4 h-4 text-yellow-600" />;
+  if (ext === 'md') return <FileText className="w-4 h-4 text-blue-500" />;
   if (CODE_EXTENSIONS.has(ext))
     return <FileCode className="w-4 h-4 text-emerald-500" />;
   if (TEXT_EXTENSIONS.has(ext))
@@ -89,10 +157,33 @@ function getFileExt(name: string): string {
   return name.split('.').pop()?.toLowerCase() || '';
 }
 
-function isClickableFile(name: string, isSystem: boolean): boolean {
+/** 黑名单扩展名/文件名模式：不显示预览/编辑按钮 */
+const PREVIEW_BLACKLIST_EXTENSIONS = new Set([
+  'tmp',
+  'swp',
+  'swo',
+  'temp',
+  'cache',
+]);
+
+/** 判断文件是否可点击预览（排除系统文件和临时文件） */
+function isPreviewableFile(name: string, isSystem: boolean): boolean {
+  if (isSystem) return false;
   const ext = getFileExt(name);
-  return IMAGE_EXTENSIONS.has(ext) || (TEXT_EXTENSIONS.has(ext) && !isSystem);
+  if (PREVIEW_BLACKLIST_EXTENSIONS.has(ext)) return false;
+  return true;
 }
+
+// Preview state: only one overlay can be open at a time
+type PreviewState =
+  | null
+  | { kind: 'image'; file: FileEntry }
+  | { kind: 'edit'; file: FileEntry }
+  | { kind: 'markdown'; file: FileEntry }
+  | { kind: 'pdf'; file: FileEntry }
+  | { kind: 'video'; file: FileEntry }
+  | { kind: 'audio'; file: FileEntry }
+  | { kind: 'text'; file: FileEntry };
 
 // ─── Helpers ─────────────────────────────────────────────────────
 
@@ -100,8 +191,53 @@ function formatSize(bytes: number): string {
   if (!bytes || bytes <= 0) return '0 B';
   const k = 1024;
   const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(k)), sizes.length - 1);
+  const i = Math.min(
+    Math.floor(Math.log(bytes) / Math.log(k)),
+    sizes.length - 1,
+  );
   return `${(bytes / Math.pow(k, i)).toFixed(1)} ${sizes[i]}`;
+}
+
+function buildPreviewUrl(groupJid: string, filePath: string): string {
+  return withBasePath(
+    `/api/groups/${encodeURIComponent(groupJid)}/files/preview/${toBase64Url(filePath)}`,
+  );
+}
+
+// ─── Media Overlay (shared shell for image/pdf/video) ──────────
+
+function MediaOverlay({
+  onClose,
+  children,
+  fileName,
+  bgOpacity = '80',
+}: {
+  onClose: () => void;
+  children: React.ReactNode;
+  fileName: string;
+  bgOpacity?: string;
+}) {
+  useEscapeKey(onClose);
+
+  return createPortal(
+    <div
+      className={`fixed inset-0 z-50 bg-black/${bgOpacity} flex items-center justify-center p-4`}
+      onClick={onClose}
+    >
+      <button
+        className="absolute top-4 right-4 text-white/70 hover:text-white transition-colors p-2 cursor-pointer z-10"
+        onClick={onClose}
+        aria-label="关闭预览"
+      >
+        <X className="w-8 h-8" />
+      </button>
+      <div className="absolute bottom-4 left-1/2 -translate-x-1/2 text-white/70 text-sm bg-black/50 px-3 py-1 rounded-full">
+        {fileName}
+      </div>
+      {children}
+    </div>,
+    document.body,
+  );
 }
 
 // ─── Image Preview Overlay ──────────────────────────────────────
@@ -115,39 +251,15 @@ function ImagePreview({
   file: FileEntry;
   onClose: () => void;
 }) {
-  useEffect(() => {
-    const handleEsc = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', handleEsc);
-    return () => window.removeEventListener('keydown', handleEsc);
-  }, [onClose]);
-
-  const previewUrl = withBasePath(`/api/groups/${encodeURIComponent(groupJid)}/files/preview/${toBase64Url(file.path)}`);
-
-  return createPortal(
-    <div
-      className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4"
-      onClick={onClose}
-    >
-      <button
-        className="absolute top-4 right-4 text-white/70 hover:text-white transition-colors p-2 cursor-pointer z-10"
-        onClick={onClose}
-        aria-label="关闭预览"
-      >
-        <X className="w-8 h-8" />
-      </button>
-      <div className="absolute bottom-4 left-1/2 -translate-x-1/2 text-white/70 text-sm bg-black/50 px-3 py-1 rounded-full">
-        {file.name}
-      </div>
+  return (
+    <MediaOverlay onClose={onClose} fileName={file.name}>
       <img
-        src={previewUrl}
+        src={buildPreviewUrl(groupJid, file.path)}
         alt={file.name}
         className="max-w-full max-h-full object-contain rounded-lg"
         onClick={(e) => e.stopPropagation()}
       />
-    </div>,
-    document.body,
+    </MediaOverlay>
   );
 }
 
@@ -168,24 +280,19 @@ function TextEditor({
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
 
+  useEscapeKey(onClose);
+
   useEffect(() => {
-    const handleEsc = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
     const handleSave = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === 's') {
         e.preventDefault();
         handleSave_();
       }
     };
-    window.addEventListener('keydown', handleEsc);
     window.addEventListener('keydown', handleSave);
-    return () => {
-      window.removeEventListener('keydown', handleEsc);
-      window.removeEventListener('keydown', handleSave);
-    };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [onClose, content, dirty]);
+    return () => window.removeEventListener('keydown', handleSave);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [content, dirty]);
 
   useEffect(() => {
     let cancelled = false;
@@ -197,7 +304,9 @@ function TextEditor({
       }
       if (!cancelled) setLoading(false);
     })();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [groupJid, file.path, getFileContent]);
 
   const handleSave_ = async () => {
@@ -221,17 +330,17 @@ function TextEditor({
         <div className="flex items-center justify-between px-4 py-3 border-b border-border flex-shrink-0">
           <div className="flex items-center gap-2 min-w-0">
             <FileIcon name={file.name} />
-            <span className="font-medium text-foreground text-sm truncate">{file.name}</span>
+            <span className="font-medium text-foreground text-sm truncate">
+              {file.name}
+            </span>
             {dirty && (
-              <span className="text-xs text-amber-500 flex-shrink-0">未保存</span>
+              <span className="text-xs text-amber-500 flex-shrink-0">
+                未保存
+              </span>
             )}
           </div>
           <div className="flex items-center gap-2 flex-shrink-0">
-            <Button
-              size="sm"
-              onClick={handleSave_}
-              disabled={!dirty || saving}
-            >
+            <Button size="sm" onClick={handleSave_} disabled={!dirty || saving}>
               {saving && <Loader2 className="size-4 animate-spin" />}
               <Save className="w-3.5 h-3.5" />
               保存
@@ -300,27 +409,24 @@ function MarkdownFileViewer({
   useEffect(() => {
     const prev = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
-    return () => { document.body.style.overflow = prev; };
+    return () => {
+      document.body.style.overflow = prev;
+    };
   }, []);
 
+  useEscapeKey(onClose);
+
   useEffect(() => {
-    const handleEsc = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
     const handleSaveKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === 's') {
         e.preventDefault();
         doSave();
       }
     };
-    window.addEventListener('keydown', handleEsc);
     window.addEventListener('keydown', handleSaveKey);
-    return () => {
-      window.removeEventListener('keydown', handleEsc);
-      window.removeEventListener('keydown', handleSaveKey);
-    };
+    return () => window.removeEventListener('keydown', handleSaveKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [onClose, editContent, dirty, mode]);
+  }, [editContent, dirty, mode]);
 
   useEffect(() => {
     let cancelled = false;
@@ -333,7 +439,9 @@ function MarkdownFileViewer({
       }
       if (!cancelled) setLoading(false);
     })();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [groupJid, file.path, getFileContent]);
 
   const doSave = async () => {
@@ -361,9 +469,12 @@ function MarkdownFileViewer({
   };
 
   // Only close on backdrop click (not on touch-scroll that ends on backdrop)
-  const handleBackdropClick = useCallback((e: React.MouseEvent) => {
-    if (e.target === e.currentTarget) onClose();
-  }, [onClose]);
+  const handleBackdropClick = useCallback(
+    (e: React.MouseEvent) => {
+      if (e.target === e.currentTarget) onClose();
+    },
+    [onClose],
+  );
 
   return createPortal(
     <div
@@ -379,9 +490,13 @@ function MarkdownFileViewer({
         <div className="flex items-center justify-between px-3 sm:px-4 py-2.5 border-b border-border flex-shrink-0">
           <div className="flex items-center gap-2 min-w-0 flex-1">
             <FileIcon name={file.name} />
-            <span className="font-medium text-foreground text-sm truncate">{file.name}</span>
+            <span className="font-medium text-foreground text-sm truncate">
+              {file.name}
+            </span>
             {dirty && (
-              <span className="text-xs text-amber-500 flex-shrink-0">未保存</span>
+              <span className="text-xs text-amber-500 flex-shrink-0">
+                未保存
+              </span>
             )}
           </div>
           <div className="flex items-center gap-1 sm:gap-1.5 flex-shrink-0">
@@ -444,7 +559,11 @@ function MarkdownFileViewer({
               className="absolute inset-0 overflow-y-auto overscroll-y-contain px-4 sm:px-6 py-4 [&_table_td]:!whitespace-normal [&_table_th]:!whitespace-normal"
               style={{ WebkitOverflowScrolling: 'touch', touchAction: 'pan-y' }}
             >
-              <MarkdownRenderer content={content} groupJid={groupJid} variant="docs" />
+              <MarkdownRenderer
+                content={content}
+                groupJid={groupJid}
+                variant="docs"
+              />
             </div>
           ) : (
             <div className="absolute inset-0 p-2 sm:p-3">
@@ -456,7 +575,10 @@ function MarkdownFileViewer({
                   setDirty(true);
                 }}
                 className="w-full h-full font-mono text-sm text-foreground resize-none bg-muted"
-                style={{ WebkitOverflowScrolling: 'touch', touchAction: 'pan-y' }}
+                style={{
+                  WebkitOverflowScrolling: 'touch',
+                  touchAction: 'pan-y',
+                }}
                 spellCheck={false}
               />
             </div>
@@ -465,7 +587,198 @@ function MarkdownFileViewer({
 
         {/* Footer */}
         <div className="px-3 sm:px-4 py-1.5 border-t border-border text-xs text-muted-foreground flex-shrink-0">
-          {mode === 'edit' ? 'Ctrl/Cmd+S 保存 · Esc 关闭' : '点击「编辑」修改内容 · Esc 关闭'}
+          {mode === 'edit'
+            ? 'Ctrl/Cmd+S 保存 · Esc 关闭'
+            : '点击「编辑」修改内容 · Esc 关闭'}
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+// ─── PDF Preview Overlay ────────────────────────────────────────
+
+function PdfPreview({
+  groupJid,
+  file,
+  onClose,
+}: {
+  groupJid: string;
+  file: FileEntry;
+  onClose: () => void;
+}) {
+  return (
+    <MediaOverlay onClose={onClose} fileName={file.name}>
+      <iframe
+        src={buildPreviewUrl(groupJid, file.path)}
+        title={file.name}
+        className="w-full h-full max-w-[90vw] max-h-[90vh] rounded-lg bg-white"
+        onClick={(e) => e.stopPropagation()}
+      />
+    </MediaOverlay>
+  );
+}
+
+// ─── Video Preview Overlay ─────────────────────────────────────
+
+function VideoPreview({
+  groupJid,
+  file,
+  onClose,
+}: {
+  groupJid: string;
+  file: FileEntry;
+  onClose: () => void;
+}) {
+  return (
+    <MediaOverlay onClose={onClose} fileName={file.name} bgOpacity="90">
+      <video
+        src={buildPreviewUrl(groupJid, file.path)}
+        controls
+        autoPlay
+        className="max-w-[90vw] max-h-[90vh] rounded-lg"
+        onClick={(e) => e.stopPropagation()}
+      />
+    </MediaOverlay>
+  );
+}
+
+// ─── Audio Preview Overlay ─────────────────────────────────────
+
+function AudioPreview({
+  groupJid,
+  file,
+  onClose,
+}: {
+  groupJid: string;
+  file: FileEntry;
+  onClose: () => void;
+}) {
+  useEscapeKey(onClose);
+
+  return createPortal(
+    <div
+      className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4"
+      onClick={onClose}
+    >
+      <div
+        className="bg-surface rounded-xl shadow-xl w-full max-w-lg p-6 flex flex-col items-center gap-4"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center gap-3 w-full">
+          <Music className="w-10 h-10 text-cyan-500 flex-shrink-0" />
+          <div className="flex-1 min-w-0">
+            <p className="font-medium text-foreground truncate">{file.name}</p>
+            <p className="text-xs text-muted-foreground">
+              {formatSize(file.size)}
+            </p>
+          </div>
+          <button
+            onClick={onClose}
+            className="text-muted-foreground hover:text-foreground transition-colors p-2 cursor-pointer"
+            aria-label="关闭"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+        <audio
+          src={buildPreviewUrl(groupJid, file.path)}
+          controls
+          autoPlay
+          className="w-full"
+        />
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+// ─── Generic File Preview (for hidden files like .gitignore) ──
+
+function GenericTextPreview({
+  groupJid,
+  file,
+  onClose,
+}: {
+  groupJid: string;
+  file: FileEntry;
+  onClose: () => void;
+}) {
+  const { getFileContent } = useFileStore();
+  const [content, setContent] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+
+  useEscapeKey(onClose);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      setLoadError(false);
+      const text = await getFileContent(groupJid, file.path);
+      if (!cancelled) {
+        if (text !== null) {
+          setContent(text);
+        } else {
+          setLoadError(true);
+        }
+        setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [groupJid, file.path, getFileContent]);
+
+  return createPortal(
+    <div
+      className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-3 lg:p-6"
+      onClick={onClose}
+    >
+      <div
+        className="bg-surface rounded-xl shadow-xl w-full max-w-4xl h-[85vh] supports-[height:100dvh]:h-[85vh] flex flex-col animate-in zoom-in-95 duration-200"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between px-4 py-3 border-b border-border flex-shrink-0">
+          <div className="flex items-center gap-2 min-w-0">
+            <FileIcon name={file.name} />
+            <span className="font-medium text-foreground text-sm truncate">
+              {file.name}
+            </span>
+          </div>
+          <button
+            onClick={onClose}
+            className="text-muted-foreground hover:text-foreground transition-colors p-2 rounded-md hover:bg-muted cursor-pointer"
+            aria-label="关闭预览"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        {/* Content */}
+        <div className="flex-1 p-4 overflow-auto">
+          {loading ? (
+            <div className="flex items-center justify-center h-full">
+              <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
+            </div>
+          ) : loadError ? (
+            <div className="flex flex-col items-center justify-center h-full gap-3 text-muted-foreground">
+              <AlertCircle className="w-10 h-10" />
+              <p className="text-sm">此文件类型不支持预览</p>
+            </div>
+          ) : (
+            <pre className="text-sm text-foreground whitespace-pre-wrap break-all font-mono">
+              {content}
+            </pre>
+          )}
+        </div>
+
+        {/* Footer hint */}
+        <div className="px-4 py-2 border-t border-border text-xs text-muted-foreground flex-shrink-0">
+          Esc 关闭
         </div>
       </div>
     </div>,
@@ -476,8 +789,15 @@ function MarkdownFileViewer({
 // ─── Main FilePanel ─────────────────────────────────────────────
 
 export function FilePanel({ groupJid, onClose }: FilePanelProps) {
-  const { files, currentPath, loading, loadFiles, deleteFile, createDirectory, navigateTo } =
-    useFileStore();
+  const {
+    files,
+    currentPath,
+    loading,
+    loadFiles,
+    deleteFile,
+    createDirectory,
+    navigateTo,
+  } = useFileStore();
 
   const [createDirModal, setCreateDirModal] = useState(false);
   const [newDirName, setNewDirName] = useState('');
@@ -493,10 +813,8 @@ export function FilePanel({ groupJid, onClose }: FilePanelProps) {
   }>({ open: false, path: '', name: '', isDir: false });
   const [deleteLoading, setDeleteLoading] = useState(false);
 
-  // Preview / Editor state
-  const [previewFile, setPreviewFile] = useState<FileEntry | null>(null);
-  const [editFile, setEditFile] = useState<FileEntry | null>(null);
-  const [mdViewFile, setMdViewFile] = useState<FileEntry | null>(null);
+  // Preview / Editor state — only one overlay can be open at a time
+  const [preview, setPreview] = useState<PreviewState>(null);
 
   const isStreaming = useChatStore((s) => !!s.streaming[groupJid]);
   const canOpenLocalFolder = useAuthStore((s) => s.user?.role === 'admin');
@@ -548,44 +866,51 @@ export function FilePanel({ groupJid, onClose }: FilePanelProps) {
     }
   };
 
-  const handleItemClick = useCallback((item: FileEntry) => {
-    if (item.type === 'directory') {
-      navigateTo(groupJid, item.path);
-      return;
-    }
+  const handleItemClick = useCallback(
+    (item: FileEntry) => {
+      if (item.type === 'directory') {
+        navigateTo(groupJid, item.path);
+        return;
+      }
 
-    const ext = getFileExt(item.name);
+      const ext = getFileExt(item.name);
 
-    // 图片 → 预览
-    if (IMAGE_EXTENSIONS.has(ext)) {
-      setPreviewFile(item);
-      return;
-    }
-
-    // Markdown 文件（非系统） → Markdown 预览/编辑
-    if (ext === 'md' && !item.isSystem) {
-      setMdViewFile(item);
-      return;
-    }
-
-    // 文本文件（非系统） → 编辑
-    if (TEXT_EXTENSIONS.has(ext) && !item.isSystem) {
-      setEditFile(item);
-      return;
-    }
-  }, [groupJid, navigateTo]);
+      if (IMAGE_EXTENSIONS.has(ext)) {
+        setPreview({ kind: 'image', file: item });
+      } else if (PDF_EXTENSIONS.has(ext)) {
+        setPreview({ kind: 'pdf', file: item });
+      } else if (VIDEO_EXTENSIONS.has(ext)) {
+        setPreview({ kind: 'video', file: item });
+      } else if (AUDIO_EXTENSIONS.has(ext)) {
+        setPreview({ kind: 'audio', file: item });
+      } else if (ext === 'md' && !item.isSystem) {
+        setPreview({ kind: 'markdown', file: item });
+      } else {
+        setPreview({ kind: 'text', file: item });
+      }
+    },
+    [groupJid, navigateTo],
+  );
 
   const handleDownload = (item: FileEntry) => {
     const encoded = toBase64Url(item.path);
     const url = `/api/groups/${encodeURIComponent(groupJid)}/files/download/${encoded}`;
     downloadFromUrl(url, item.name).catch((err) => {
       console.error('Download failed:', err);
-      showToast('下载失败', err instanceof Error ? err.message : '文件下载出错，请重试');
+      showToast(
+        '下载失败',
+        err instanceof Error ? err.message : '文件下载出错，请重试',
+      );
     });
   };
 
   const handleDeleteClick = (item: FileEntry) => {
-    setDeleteModal({ open: true, path: item.path, name: item.name, isDir: item.type === 'directory' });
+    setDeleteModal({
+      open: true,
+      path: item.path,
+      name: item.name,
+      isDir: item.type === 'directory',
+    });
   };
 
   const handleDeleteConfirm = async () => {
@@ -608,9 +933,12 @@ export function FilePanel({ groupJid, onClose }: FilePanelProps) {
     setOpenDirLoading(true);
     setOpenDirError(null);
     try {
-      await api.post(`/api/groups/${encodeURIComponent(groupJid)}/files/open-directory`, {
-        path: currentDir,
-      });
+      await api.post(
+        `/api/groups/${encodeURIComponent(groupJid)}/files/open-directory`,
+        {
+          path: currentDir,
+        },
+      );
     } catch (err) {
       if (err instanceof Error) {
         setOpenDirError(err.message);
@@ -645,7 +973,9 @@ export function FilePanel({ groupJid, onClose }: FilePanelProps) {
     <div className="w-full h-full border-l border-border bg-background flex flex-col">
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-border">
-        <h3 className="font-semibold text-foreground text-sm">工作区文件管理</h3>
+        <h3 className="font-semibold text-foreground text-sm">
+          工作区文件管理
+        </h3>
         <div className="flex items-center gap-1">
           {canOpenLocalFolder && (
             <button
@@ -655,7 +985,11 @@ export function FilePanel({ groupJid, onClose }: FilePanelProps) {
               title="打开工作区文件夹"
               aria-label="打开工作区文件夹"
             >
-              {openDirLoading ? <Loader2 className="size-3.5 animate-spin" /> : <FolderOpen className="size-3.5" />}
+              {openDirLoading ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <FolderOpen className="size-3.5" />
+              )}
             </button>
           )}
           <button
@@ -720,7 +1054,9 @@ export function FilePanel({ groupJid, onClose }: FilePanelProps) {
         ) : (
           <div className="space-y-0.5">
             {sortedFiles.map((item) => {
-              const clickable = item.type === 'directory' || isClickableFile(item.name, !!item.isSystem);
+              const clickable =
+                item.type === 'directory' ||
+                isPreviewableFile(item.name, !!item.isSystem);
               return (
                 <div
                   key={item.path}
@@ -747,17 +1083,19 @@ export function FilePanel({ groupJid, onClose }: FilePanelProps) {
                     <div className="flex items-center gap-1.5">
                       <span
                         className={`text-sm truncate ${
-                          item.isSystem ? 'text-muted-foreground' : 'text-foreground'
+                          item.isSystem
+                            ? 'text-muted-foreground'
+                            : 'text-foreground'
                         }`}
                       >
                         {item.name}
                       </span>
-                      {item.isSystem && (
-                        <Badge variant="neutral">系统</Badge>
-                      )}
+                      {item.isSystem && <Badge variant="neutral">系统</Badge>}
                     </div>
                     {item.type === 'file' && (
-                      <p className="text-[11px] text-muted-foreground leading-tight">{formatSize(item.size)}</p>
+                      <p className="text-[11px] text-muted-foreground leading-tight">
+                        {formatSize(item.size)}
+                      </p>
                     )}
                   </div>
 
@@ -765,19 +1103,20 @@ export function FilePanel({ groupJid, onClose }: FilePanelProps) {
                   {!item.isSystem && (
                     <div className="flex-shrink-0 flex items-center gap-0.5">
                       {/* Edit button for text files */}
-                      {item.type === 'file' && TEXT_EXTENSIONS.has(getFileExt(item.name)) && (
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setEditFile(item);
-                          }}
-                          className="p-2.5 rounded hover:bg-brand-100 text-muted-foreground hover:text-primary transition-colors cursor-pointer"
-                          title="编辑"
-                          aria-label="编辑文件"
-                        >
-                          <Pencil className="w-3.5 h-3.5" />
-                        </button>
-                      )}
+                      {item.type === 'file' &&
+                        TEXT_EXTENSIONS.has(getFileExt(item.name)) && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setPreview({ kind: 'edit', file: item });
+                            }}
+                            className="p-2.5 rounded hover:bg-brand-100 text-muted-foreground hover:text-primary transition-colors cursor-pointer"
+                            title="编辑"
+                            aria-label="编辑文件"
+                          >
+                            <Pencil className="w-3.5 h-3.5" />
+                          </button>
+                        )}
                       {item.type === 'file' && (
                         <button
                           onClick={(e) => {
@@ -829,7 +1168,12 @@ export function FilePanel({ groupJid, onClose }: FilePanelProps) {
 
       {/* Footer */}
       <div className="p-3 border-t border-border space-y-2">
-        <Button variant="outline" size="sm" onClick={handleCreateDir} className="w-full">
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={handleCreateDir}
+          className="w-full"
+        >
           <FolderPlus className="w-4 h-4" />
           新建文件夹
         </Button>
@@ -837,7 +1181,10 @@ export function FilePanel({ groupJid, onClose }: FilePanelProps) {
       </div>
 
       {/* Create Directory Dialog */}
-      <Dialog open={createDirModal} onOpenChange={(v) => !v && setCreateDirModal(false)}>
+      <Dialog
+        open={createDirModal}
+        onOpenChange={(v) => !v && setCreateDirModal(false)}
+      >
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle>新建文件夹</DialogTitle>
@@ -849,15 +1196,28 @@ export function FilePanel({ groupJid, onClose }: FilePanelProps) {
                 type="text"
                 value={newDirName}
                 onChange={(e) => setNewDirName(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter') handleCreateDirConfirm(); }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') handleCreateDirConfirm();
+                }}
                 placeholder="输入文件夹名称"
                 autoFocus
               />
             </div>
             <div className="flex justify-end gap-2">
-              <Button variant="ghost" onClick={() => setCreateDirModal(false)} disabled={createDirLoading}>取消</Button>
-              <Button onClick={handleCreateDirConfirm} disabled={createDirLoading}>
-                {createDirLoading && <Loader2 className="size-4 animate-spin" />}
+              <Button
+                variant="ghost"
+                onClick={() => setCreateDirModal(false)}
+                disabled={createDirLoading}
+              >
+                取消
+              </Button>
+              <Button
+                onClick={handleCreateDirConfirm}
+                disabled={createDirLoading}
+              >
+                {createDirLoading && (
+                  <Loader2 className="size-4 animate-spin" />
+                )}
                 创建
               </Button>
             </div>
@@ -868,7 +1228,9 @@ export function FilePanel({ groupJid, onClose }: FilePanelProps) {
       {/* Delete Confirm */}
       <ConfirmDialog
         open={deleteModal.open}
-        onClose={() => setDeleteModal({ open: false, path: '', name: '', isDir: false })}
+        onClose={() =>
+          setDeleteModal({ open: false, path: '', name: '', isDir: false })
+        }
         onConfirm={handleDeleteConfirm}
         title={deleteModal.isDir ? '删除文件夹' : '删除文件'}
         message={
@@ -882,31 +1244,27 @@ export function FilePanel({ groupJid, onClose }: FilePanelProps) {
         loading={deleteLoading}
       />
 
-      {/* Image Preview Overlay */}
-      {previewFile && (
-        <ImagePreview
-          groupJid={groupJid}
-          file={previewFile}
-          onClose={() => setPreviewFile(null)}
-        />
+      {/* Preview / Editor Overlays */}
+      {preview?.kind === 'image' && (
+        <ImagePreview groupJid={groupJid} file={preview.file} onClose={() => setPreview(null)} />
       )}
-
-      {/* Text Editor Overlay */}
-      {editFile && (
-        <TextEditor
-          groupJid={groupJid}
-          file={editFile}
-          onClose={() => setEditFile(null)}
-        />
+      {preview?.kind === 'edit' && (
+        <TextEditor groupJid={groupJid} file={preview.file} onClose={() => setPreview(null)} />
       )}
-
-      {/* Markdown Viewer Overlay */}
-      {mdViewFile && (
-        <MarkdownFileViewer
-          groupJid={groupJid}
-          file={mdViewFile}
-          onClose={() => setMdViewFile(null)}
-        />
+      {preview?.kind === 'markdown' && (
+        <MarkdownFileViewer groupJid={groupJid} file={preview.file} onClose={() => setPreview(null)} />
+      )}
+      {preview?.kind === 'pdf' && (
+        <PdfPreview groupJid={groupJid} file={preview.file} onClose={() => setPreview(null)} />
+      )}
+      {preview?.kind === 'video' && (
+        <VideoPreview groupJid={groupJid} file={preview.file} onClose={() => setPreview(null)} />
+      )}
+      {preview?.kind === 'audio' && (
+        <AudioPreview groupJid={groupJid} file={preview.file} onClose={() => setPreview(null)} />
+      )}
+      {preview?.kind === 'text' && (
+        <GenericTextPreview groupJid={groupJid} file={preview.file} onClose={() => setPreview(null)} />
       )}
     </div>
   );

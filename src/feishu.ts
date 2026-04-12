@@ -39,8 +39,8 @@ interface FeishuFileInfo {
 
 export interface ConnectOptions {
   onReady: () => void;
-  /** 收到消息后调用，让调用方自动注册未知的飞书聊天。返回 false 表示拒绝该聊天，消息将被丢弃 */
-  onNewChat?: (chatJid: string, chatName: string) => boolean;
+  /** 收到消息后调用，让调用方自动注册未知的飞书聊天 */
+  onNewChat?: (chatJid: string, chatName: string) => void;
   /** 热重连时设置：丢弃 create_time 早于此时间戳（epoch ms）的消息，避免处理渠道关闭期间的堆积消息 */
   ignoreMessagesBefore?: number;
   /** 斜杠指令回调（如 /clear），返回回复文本或 null */
@@ -972,14 +972,7 @@ export function createFeishuConnection(
     const resolvedChatName = chatType === 'p2p' ? '飞书私聊' : '飞书群聊';
 
     // 先注册会话，确保 resolveGroupFolder 能正确解析 folder（含首条文件消息场景）
-    // onNewChat 返回 false 表示该聊天被拒绝（如 autoRegisterIMChats 关闭时的未注册群组）
-    if (onNewChat && !onNewChat(chatJid, resolvedChatName)) {
-      logger.debug(
-        { chatJid, messageId },
-        'Dropped message: chat not registered and auto-registration disabled',
-      );
-      return;
-    }
+    onNewChat?.(chatJid, resolvedChatName);
 
     let attachmentsJson: string | undefined;
 
@@ -1831,8 +1824,12 @@ export function createFeishuConnection(
           throw new Error('文件上传失败：未返回 file_key');
         }
 
+        // Determine msg_type: Feishu requires upload file_type and send msg_type to match.
+        // mp4 → media (video message), opus → audio (audio message), others → file.
+        const msgType = fileType === 'mp4' ? 'media' : fileType === 'opus' ? 'audio' : 'file';
+
         // Send file message
-        await sendToFeishu(chatId, 'file', JSON.stringify({ file_key: fileKey }));
+        await sendToFeishu(chatId, msgType, JSON.stringify({ file_key: fileKey }));
 
         logger.info(
           { chatId, fileName, fileSize: buffer.length },
@@ -1963,8 +1960,8 @@ let _defaultInstance: FeishuConnection | null = null;
 
 export interface ConnectFeishuOptions {
   onReady: () => void;
-  /** 收到消息后调用，让主模块自动注册未知的飞书聊天到主容器。返回 false 表示拒绝 */
-  onNewChat?: (chatJid: string, chatName: string) => boolean;
+  /** 收到消息后调用，让主模块自动注册未知的飞书聊天到主容器 */
+  onNewChat?: (chatJid: string, chatName: string) => void;
   /** 热重连时设置：丢弃 create_time 早于此时间戳（epoch ms）的消息，避免处理渠道关闭期间的堆积消息 */
   ignoreMessagesBefore?: number;
 }

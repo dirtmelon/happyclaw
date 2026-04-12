@@ -1,7 +1,11 @@
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
-import { WEB_SESSION_SECRET } from './config.js';
-import { logger } from './logger.js';
+import {
+  WEB_SESSION_SECRET,
+  SESSION_COOKIE_NAME_SECURE,
+  SESSION_COOKIE_NAME_PLAIN,
+} from './config.js';
+import { isSecureRequest } from './utils.js';
 
 const BCRYPT_ROUNDS = 12;
 
@@ -33,27 +37,18 @@ export function signSessionToken(token: string): string {
   return `${token}.${sig}`;
 }
 
-// Legacy unsigned tokens are accepted during a 7-day migration window.
-// After the deadline all unsigned sessions expire; users simply re-login
-// to obtain a new HMAC-signed session token.
-const HMAC_MIGRATION_DEADLINE_MS = new Date('2026-04-12T00:00:00Z').getTime();
-const HMAC_MIGRATION_DEADLINE_ISO = '2026-04-12T00:00:00.000Z';
-const warnedLegacyTokens = new Set<string>();
+export interface VerifiedToken {
+  token: string;
+  /** True when the cookie was a legacy unsigned token, caller should upgrade via Set-Cookie. */
+  legacy: boolean;
+}
 
 /** Verify and extract the raw token from a signed cookie value. Returns null if invalid. */
-export function verifySessionToken(signedValue: string): string | null {
+export function verifySessionToken(signedValue: string): VerifiedToken | null {
   const dotIndex = signedValue.lastIndexOf('.');
   if (dotIndex === -1) {
-    // Legacy unsigned token — accept only within migration window
-    if (Date.now() < HMAC_MIGRATION_DEADLINE_MS) {
-      if (!warnedLegacyTokens.has(signedValue)) {
-        warnedLegacyTokens.add(signedValue);
-        logger.warn('Legacy unsigned session token accepted (migration window). Will expire after %s', HMAC_MIGRATION_DEADLINE_ISO);
-      }
-      return signedValue;
-    }
-    // Migration window expired — reject unsigned token
-    return null;
+    // Legacy unsigned token — accept and flag for upgrade
+    return { token: signedValue, legacy: true };
   }
   const token = signedValue.substring(0, dotIndex);
   const sig = signedValue.substring(dotIndex + 1);
@@ -68,7 +63,24 @@ export function verifySessionToken(signedValue: string): string | null {
   if (sigBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(sigBuf, expectedBuf)) {
     return null;
   }
-  return token;
+  return { token, legacy: false };
+}
+
+/** Build a Set-Cookie header value for a session token (signs + flags secure/plain). */
+export function setSessionCookie(c: any, token: string): string {
+  const secure = isSecureRequest(c);
+  const name = secure ? SESSION_COOKIE_NAME_SECURE : SESSION_COOKIE_NAME_PLAIN;
+  const secureSuffix = secure ? '; Secure' : '';
+  const signedToken = signSessionToken(token);
+  return `${name}=${signedToken}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${30 * 24 * 60 * 60}${secureSuffix}`;
+}
+
+/** Build a Set-Cookie header value that clears the session cookie. */
+export function clearSessionCookie(c: any): string {
+  const secure = isSecureRequest(c);
+  const name = secure ? SESSION_COOKIE_NAME_SECURE : SESSION_COOKIE_NAME_PLAIN;
+  const secureSuffix = secure ? '; Secure' : '';
+  return `${name}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${secureSuffix}`;
 }
 
 export function generateUserId(): string {

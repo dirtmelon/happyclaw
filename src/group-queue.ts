@@ -316,6 +316,15 @@ export class GroupQueue {
     return stuck;
   }
 
+  /**
+   * Get the PID of the active runner process for a group.
+   * Returns undefined if no active process or running in container mode.
+   */
+  getRunnerPid(groupJid: string): number | undefined {
+    const state = this.groups.get(groupJid);
+    return state?.process?.pid;
+  }
+
   enqueueMessageCheck(groupJid: string): void {
     if (this.shuttingDown) return;
 
