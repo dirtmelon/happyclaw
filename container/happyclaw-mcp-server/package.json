@@ -1,0 +1,24 @@
+{
+  "name": "happyclaw-mcp-server",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Standalone stdio MCP server exposing HappyClaw built-in tools (send_message, schedule_task, memory_*, etc.) — consumed by both agent-runner (Claude path) and cursor-runner (Cursor path).",
+  "main": "dist/index.js",
+  "bin": {
+    "happyclaw-mcp-server": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "cron-parser": "^5.0.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.7",
+    "typescript": "^5.9.3"
+  },
+  "license": "MIT"
+}

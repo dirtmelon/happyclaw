@@ -33,7 +33,7 @@ import {
   writeCredentialsFile,
 } from './runtime-config.js';
 import { providerPool } from './provider-pool.js';
-import { getSessionProviderId, setSessionProviderId } from './db.js';
+import { getSessionProviderId, setSessionProviderId, getUserById } from './db.js';
 import { isApiError } from './agent-output-parser.js';
 import type { ClaudeProviderConfig } from './runtime-config.js';
 import { loadUserMcpServers } from './mcp-utils.js';
@@ -41,7 +41,9 @@ import {
   checkHostCapabilities,
   logCapabilityPreflight,
 } from './agent-capabilities.js';
-import { MessageSourceKind, RegisteredGroup, StreamEvent } from './types.js';
+import { MessageSourceKind, RegisteredGroup, Runtime, StreamEvent } from './types.js';
+import { resolveGroupRuntime } from './runtime-resolver.js';
+import { resolveCursorModel } from './cursor-model-resolver.js';
 import {
   attachStderrHandler,
   attachStdoutHandler,
@@ -374,6 +376,9 @@ function trySelectPoolProvider(
 function buildVolumeMounts(
   group: RegisteredGroup,
   isAdminHome: boolean,
+  /** Resolved agent backend; baked into the per-container env file as
+   * `HAPPYCLAW_RUNTIME` so entrypoint.sh dispatches to the right dist. */
+  runtime: Runtime,
   mountUserSkills = true,
   agentId?: string,
   ownerHomeFolder?: string,
@@ -573,6 +578,25 @@ function buildVolumeMounts(
   if (sysAutoCompact > 0) {
     envLines.push(`AUTO_COMPACT_WINDOW=${sysAutoCompact}`);
   }
+
+  // Step 4 wiring: tell entrypoint.sh which runner to spawn. Default
+  // 'claude' keeps the existing behavior for groups created before v38.
+  envLines.push(`HAPPYCLAW_RUNTIME=${runtime}`);
+
+  // Cursor backend extras: forward CURSOR_API_KEY when set in the host process
+  // env, and resolve the effective Cursor model (group → user → env → default)
+  // so per-group / per-user model overrides actually flow into the container.
+  if (runtime === 'cursor') {
+    if (process.env.CURSOR_API_KEY) {
+      envLines.push(`CURSOR_API_KEY=${process.env.CURSOR_API_KEY}`);
+    }
+    const owner = group.created_by ? getUserById(group.created_by) : undefined;
+    const effectiveCursorModel = resolveCursorModel(group, owner);
+    envLines.push(`CURSOR_MODEL=${effectiveCursorModel}`);
+    // Step 5: cursor-runner reads prompts to render <workspace>/AGENTS.md.
+    // entrypoint.sh symlinks /app/prompts → /tmp/prompts, so point there.
+    envLines.push(`HAPPYCLAW_PROMPTS_DIR=/tmp/prompts`);
+  }
   if (envLines.length > 0) {
     const envFilePath = path.join(envDir, 'env');
     const quotedLines = shellQuoteEnvLines(envLines);
@@ -629,6 +653,42 @@ function buildVolumeMounts(
     containerPath: '/app/src',
     readonly: true,
   });
+
+  // Mount happyclaw-mcp-server source — same pattern as agent-runner.
+  // entrypoint.sh recompiles to /app/mcp-server/dist/, agent-runner spawns
+  // the resulting JS as the stdio MCP child (HAPPYCLAW_MCP_SERVER_DIST is
+  // baked into the image via Dockerfile ENV).
+  const mcpServerSrc = path.join(
+    projectRoot,
+    'container',
+    'happyclaw-mcp-server',
+    'src',
+  );
+  if (fs.existsSync(mcpServerSrc)) {
+    mounts.push({
+      hostPath: mcpServerSrc,
+      containerPath: '/app/mcp-server/src',
+      readonly: true,
+    });
+  }
+
+  // Mount cursor-runner source — same pattern. entrypoint.sh recompiles
+  // to /app/cursor-runner/dist/, the runtime selector then spawns either
+  // /app/dist/index.js (Claude path) or /app/cursor-runner/dist/index.js
+  // (Cursor path) based on $HAPPYCLAW_RUNTIME.
+  const cursorRunnerSrc = path.join(
+    projectRoot,
+    'container',
+    'cursor-runner',
+    'src',
+  );
+  if (fs.existsSync(cursorRunnerSrc)) {
+    mounts.push({
+      hostPath: cursorRunnerSrc,
+      containerPath: '/app/cursor-runner/src',
+      readonly: true,
+    });
+  }
 
   // Admin's ~/.claude/ config: mount CLAUDE.md and rules/ into /workspace/
   // so the SDK's directory traversal (cwd → root) discovers them at /workspace/ level.
@@ -736,6 +796,67 @@ function buildContainerArgs(
   return args;
 }
 
+// ── Runtime dispatch ───────────────────────────────────────────────────────
+
+/**
+ * Resolve the agent backend (`claude` / `cursor`) for a registered group.
+ * Looks up the group owner so per-user `default_runtime` is honored when no
+ * group-level override exists. See `src/runtime-resolver.ts` for the
+ * decision order: group.runtime → owner.default_runtime → DEFAULT_RUNTIME.
+ *
+ * Falls back gracefully when `group.created_by` is missing or the user record
+ * has been deleted — older groups predate the per-user runtime field, so we
+ * treat their owner as "claude default" and proceed.
+ */
+function resolveRuntimeForGroup(group: RegisteredGroup): Runtime {
+  const owner = group.created_by ? getUserById(group.created_by) : undefined;
+  return resolveGroupRuntime(group, owner);
+}
+
+interface RunnerSetup {
+  runtime: Runtime;
+  /** Absolute path to `container/<runner>/`. */
+  root: string;
+  /** Absolute path to `container/<runner>/dist/index.js` — the spawn target. */
+  dist: string;
+  /** Module names that must be present under `node_modules/` for the runner
+   * to start. Used as a fail-fast preflight before spawn. */
+  requiredDeps: string[];
+  /** Manual install command to surface in setup-error messages. */
+  installHint: string;
+  /** Manual build command to surface in setup-error messages. */
+  buildHint: string;
+  /** Short label used in log lines and dist-stale banners. */
+  label: string;
+}
+
+function getRunnerSetup(runtime: Runtime, projectRoot: string): RunnerSetup {
+  if (runtime === 'cursor') {
+    const root = path.join(projectRoot, 'container', 'cursor-runner');
+    return {
+      runtime,
+      root,
+      dist: path.join(root, 'dist', 'index.js'),
+      // cursor-runner has no SDK/lib runtime deps — its only real dependency
+      // is the cursor-agent binary, which is checked separately below.
+      requiredDeps: [],
+      installHint: 'npm --prefix container/cursor-runner install',
+      buildHint: 'npm --prefix container/cursor-runner run build',
+      label: 'cursor-runner',
+    };
+  }
+  const root = path.join(projectRoot, 'container', 'agent-runner');
+  return {
+    runtime,
+    root,
+    dist: path.join(root, 'dist', 'index.js'),
+    requiredDeps: ['@anthropic-ai/claude-agent-sdk'],
+    installHint: 'npm --prefix container/agent-runner install',
+    buildHint: 'npm --prefix container/agent-runner run build',
+    label: 'agent-runner',
+  };
+}
+
 export async function runContainerAgent(
   group: RegisteredGroup,
   input: ContainerInput,
@@ -744,6 +865,9 @@ export async function runContainerAgent(
   ownerHomeFolder?: string,
 ): Promise<ContainerOutput> {
   const startTime = Date.now();
+  // Pick agent-runner vs cursor-runner; entrypoint.sh inside the container
+  // reads $HAPPYCLAW_RUNTIME to select which dist to spawn.
+  const runtime = resolveRuntimeForGroup(group);
 
   const groupDir = path.join(GROUPS_DIR, group.folder);
   mkdirForContainer(groupDir);
@@ -761,6 +885,7 @@ export async function runContainerAgent(
     const mounts = buildVolumeMounts(
       group,
       isAdminHome,
+      runtime,
       shouldMountUserSkills,
       input.agentId,
       ownerHomeFolder,
@@ -1053,8 +1178,11 @@ export async function runHostAgent(
   ownerHomeFolder?: string,
 ): Promise<ContainerOutput> {
   const startTime = Date.now();
-  const setupInstallHint = 'npm --prefix container/agent-runner install';
-  const setupBuildHint = 'npm --prefix container/agent-runner run build';
+  // Pick agent-runner vs cursor-runner from group / owner config (Step 4 wiring).
+  const runtime = resolveRuntimeForGroup(group);
+  const runnerSetup = getRunnerSetup(runtime, process.cwd());
+  const setupInstallHint = runnerSetup.installHint;
+  const setupBuildHint = runnerSetup.buildHint;
   const hostModeSetupError = (message: string): ContainerOutput => ({
     status: 'error',
     result: `宿主机模式启动失败：${message}`,
@@ -1448,6 +1576,37 @@ export async function runHostAgent(
     // 相当于显式沙箱，故无条件声明而不再仅限 root —— 非 root 部署也保留语义对齐。
     hostEnv['IS_SANDBOX'] = '1';
 
+    // Cursor backend extras: forward CURSOR_API_KEY when present in the host
+    // process env. cursor-agent prefers OAuth (`cursor-agent login`), but
+    // headless deployments / CI / per-user API keys flow through here.
+    // Step 6 will surface per-user CURSOR_API_KEY storage in the UI; until
+    // then, operators set it once in the happyclaw service env.
+    if (runtime === 'cursor') {
+      if (process.env.CURSOR_API_KEY) {
+        hostEnv['CURSOR_API_KEY'] = process.env.CURSOR_API_KEY;
+      }
+      if (process.env.CURSOR_AGENT_BIN) {
+        hostEnv['CURSOR_AGENT_BIN'] = process.env.CURSOR_AGENT_BIN;
+      }
+      // Resolve effective model (group override → user default → env → hard
+      // default) and force-write it; this overrides any pre-existing
+      // CURSOR_MODEL inherited from the host process so a per-group choice
+      // wins, even when the host env has its own value set by ops.
+      const ownerForModel = group.created_by
+        ? getUserById(group.created_by)
+        : undefined;
+      hostEnv['CURSOR_MODEL'] = resolveCursorModel(group, ownerForModel);
+      // Step 5: cursor-runner reads agent-runner's prompts/ on every turn to
+      // re-render <workspace>/AGENTS.md. Point it at the canonical source
+      // (avoiding duplicate prompt files across runners).
+      hostEnv['HAPPYCLAW_PROMPTS_DIR'] = path.join(
+        process.cwd(),
+        'container',
+        'agent-runner',
+        'prompts',
+      );
+    }
+
     // 5b. Host capability preflight — detect external tools & inject env vars
     const capResult = await checkHostCapabilities();
     logCapabilityPreflight(group.name, capResult);
@@ -1471,13 +1630,12 @@ export async function runHostAgent(
 
     // 6. 编译检查
     const projectRoot = process.cwd();
-    const agentRunnerRoot = path.join(projectRoot, 'container', 'agent-runner');
-    const agentRunnerNodeModules = path.join(agentRunnerRoot, 'node_modules');
-    const agentRunnerDist = path.join(agentRunnerRoot, 'dist', 'index.js');
-    const requiredDeps = ['@anthropic-ai/claude-agent-sdk'];
-    const missingDeps = requiredDeps.filter((dep) => {
+    const runnerRoot = runnerSetup.root;
+    const runnerNodeModules = path.join(runnerRoot, 'node_modules');
+    const runnerDist = runnerSetup.dist;
+    const missingDeps = runnerSetup.requiredDeps.filter((dep) => {
       const depJson = path.join(
-        agentRunnerNodeModules,
+        runnerNodeModules,
         ...dep.split('/'),
         'package.json',
       );
@@ -1486,48 +1644,90 @@ export async function runHostAgent(
     if (missingDeps.length > 0) {
       const missing = missingDeps.join(', ');
       logger.error(
-        { group: group.name, missingDeps },
+        { group: group.name, runtime, missingDeps },
         'Host agent preflight failed: dependencies missing',
       );
       return hostModeSetupError(
-        `缺少 agent-runner 依赖（${missing}）。请先执行：${setupInstallHint}`,
+        `缺少 ${runnerSetup.label} 依赖（${missing}）。请先执行：${setupInstallHint}`,
       );
     }
-    if (!fs.existsSync(agentRunnerDist)) {
+    if (!fs.existsSync(runnerDist)) {
       logger.error(
-        { group: group.name, agentRunnerDist },
+        { group: group.name, runtime, runnerDist },
         'Host agent preflight failed: dist not found',
       );
       return hostModeSetupError(
-        `agent-runner 未编译。请先执行：${setupBuildHint}`,
+        `${runnerSetup.label} 未编译。请先执行：${setupBuildHint}`,
       );
+    }
+
+    // Cursor backend additionally requires the cursor-agent CLI on PATH.
+    if (runtime === 'cursor') {
+      try {
+        execFileSync(
+          process.env.CURSOR_AGENT_BIN || 'cursor-agent',
+          ['--version'],
+          { timeout: 5_000, stdio: 'ignore' },
+        );
+      } catch {
+        return hostModeSetupError(
+          'cursor-agent 未安装或不在 PATH 中。安装方法：' +
+            'curl https://cursor.com/install -fsS | bash 然后重启 happyclaw。' +
+            '或设置 CURSOR_AGENT_BIN 环境变量指向 cursor-agent 二进制。',
+        );
+      }
+    }
+
+    // happyclaw-mcp-server preflight: required for the new stdio MCP path.
+    // When the user has set HAPPYCLAW_USE_LEGACY_MCP=1 in their shell, the
+    // env var is propagated below and the runner falls back to the in-process
+    // SDK MCP, so a missing dist there is a soft warning, not a hard error.
+    const mcpServerRoot = path.join(projectRoot, 'container', 'happyclaw-mcp-server');
+    const mcpServerDist = path.join(mcpServerRoot, 'dist', 'index.js');
+    const useLegacyMcp = process.env.HAPPYCLAW_USE_LEGACY_MCP === '1';
+    if (fs.existsSync(mcpServerDist)) {
+      hostEnv['HAPPYCLAW_MCP_SERVER_DIST'] = mcpServerDist;
+    } else if (!useLegacyMcp) {
+      logger.error(
+        { group: group.name, mcpServerDist },
+        'Host agent preflight failed: happyclaw-mcp-server dist not found',
+      );
+      return hostModeSetupError(
+        `happyclaw-mcp-server 未编译。请先执行：${setupBuildHint}（或设 HAPPYCLAW_USE_LEGACY_MCP=1 临时回退）`,
+      );
+    }
+    if (useLegacyMcp) {
+      hostEnv['HAPPYCLAW_USE_LEGACY_MCP'] = '1';
     }
 
     // Auto-rebuild if dist is stale (src newer than dist)
     try {
-      const distMtime = fs.statSync(agentRunnerDist).mtimeMs;
-      const srcDir = path.join(agentRunnerRoot, 'src');
+      const distMtime = fs.statSync(runnerDist).mtimeMs;
+      const srcDir = path.join(runnerRoot, 'src');
       const srcFiles = fs.readdirSync(srcDir);
       const newestSrc = Math.max(
         ...srcFiles.map((f) => fs.statSync(path.join(srcDir, f)).mtimeMs),
       );
       if (newestSrc > distMtime) {
         logger.info(
-          { group: group.name },
-          'agent-runner dist 已过期，自动重新编译...',
+          { group: group.name, runtime },
+          `${runnerSetup.label} dist 已过期，自动重新编译...`,
         );
         try {
           const { execSync } = await import('child_process');
           execSync('npm run build', {
-            cwd: agentRunnerRoot,
+            cwd: runnerRoot,
             stdio: 'pipe',
             timeout: 30_000,
           });
-          logger.info({ group: group.name }, 'agent-runner 自动编译完成');
+          logger.info(
+            { group: group.name, runtime },
+            `${runnerSetup.label} 自动编译完成`,
+          );
         } catch (buildErr) {
           logger.warn(
-            { group: group.name, err: buildErr },
-            `agent-runner 自动编译失败，使用旧版 dist。手动执行：${setupBuildHint}`,
+            { group: group.name, runtime, err: buildErr },
+            `${runnerSetup.label} 自动编译失败，使用旧版 dist。手动执行：${setupBuildHint}`,
           );
         }
       }
@@ -1535,9 +1735,49 @@ export async function runHostAgent(
       // Best effort, don't block execution
     }
 
+    // Same auto-rebuild logic for happyclaw-mcp-server
+    if (fs.existsSync(mcpServerDist)) {
+      try {
+        const distMtime = fs.statSync(mcpServerDist).mtimeMs;
+        const srcDir = path.join(mcpServerRoot, 'src');
+        const srcFiles = fs.readdirSync(srcDir);
+        const newestSrc = Math.max(
+          ...srcFiles.map((f) => fs.statSync(path.join(srcDir, f)).mtimeMs),
+        );
+        if (newestSrc > distMtime) {
+          logger.info(
+            { group: group.name },
+            'happyclaw-mcp-server dist 已过期，自动重新编译...',
+          );
+          try {
+            const { execSync } = await import('child_process');
+            execSync('npm run build', {
+              cwd: mcpServerRoot,
+              stdio: 'pipe',
+              timeout: 30_000,
+            });
+            logger.info(
+              { group: group.name },
+              'happyclaw-mcp-server 自动编译完成',
+            );
+          } catch (buildErr) {
+            logger.warn(
+              { group: group.name, err: buildErr },
+              `happyclaw-mcp-server 自动编译失败，使用旧版 dist。手动执行：${setupBuildHint}`,
+            );
+          }
+        }
+      } catch {
+        // Best effort
+      }
+    }
+
     logger.info(
       {
         group: group.name,
+        runtime,
+        runner: runnerSetup.label,
+        runnerDist,
         workingDir: groupDir,
         isMain: input.isMain,
       },
@@ -1555,7 +1795,7 @@ export async function runHostAgent(
       };
 
       // 7. 启动进程
-      const proc = spawn('node', [agentRunnerDist], {
+      const proc = spawn('node', [runnerDist], {
         stdio: ['pipe', 'pipe', 'pipe'],
         env: hostEnv,
         cwd: groupDir,

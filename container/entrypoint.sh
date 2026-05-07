@@ -84,11 +84,33 @@ for dir in /opt/builtin-skills /workspace/external-skills /workspace/project-ski
 done
 chown -R node:node /home/node/.claude/skills 2>/dev/null || true
 
-# Compile TypeScript (agent-runner source may be hot-mounted from host)
+# Compile TypeScript runners. agent-runner is the default backend so we
+# always build it (cheap incremental tsc when src is unchanged). cursor-runner
+# is built only when HAPPYCLAW_RUNTIME=cursor — its dist is small but the tsc
+# pass adds ~1s to container startup, so we skip it for the common Claude path.
+HAPPYCLAW_RUNTIME="${HAPPYCLAW_RUNTIME:-claude}"
+
+# Always build agent-runner (the default and most common path).
 cd /app && npx tsc --outDir /tmp/dist 2>&1 >&2
 ln -s /app/node_modules /tmp/dist/node_modules
 ln -s /app/prompts /tmp/prompts
 chmod -R a-w /tmp/dist
+
+# Always build happyclaw-mcp-server (consumed by both runners as the
+# standalone stdio MCP child via HAPPYCLAW_MCP_SERVER_DIST).
+if [ -d /app/mcp-server/src ]; then
+  cd /app/mcp-server && npx tsc --outDir /tmp/mcp-server-dist 2>&1 >&2
+  ln -s /app/mcp-server/node_modules /tmp/mcp-server-dist/node_modules
+  chmod -R a-w /tmp/mcp-server-dist
+fi
+
+# Build cursor-runner only when actually selected. host-mounted src wins
+# over the baked-in copy when present.
+if [ "$HAPPYCLAW_RUNTIME" = "cursor" ] && [ -d /app/cursor-runner/src ]; then
+  cd /app/cursor-runner && npx tsc --outDir /tmp/cursor-runner-dist 2>&1 >&2
+  ln -s /app/cursor-runner/node_modules /tmp/cursor-runner-dist/node_modules
+  chmod -R a-w /tmp/cursor-runner-dist
+fi
 
 # Buffer stdin to file (container requires EOF to flush stdin pipe)
 cat > /tmp/input.json
@@ -103,5 +125,19 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Drop privileges and execute agent-runner as node user
-runuser -u node -- node /tmp/dist/index.js < /tmp/input.json
+# Drop privileges and execute the runner selected by $HAPPYCLAW_RUNTIME.
+# Default 'claude' keeps the existing behavior for groups without an
+# explicit runtime override (legacy pre-v38).
+case "$HAPPYCLAW_RUNTIME" in
+  cursor)
+    RUNNER_DIST=/tmp/cursor-runner-dist/index.js
+    ;;
+  claude|"")
+    RUNNER_DIST=/tmp/dist/index.js
+    ;;
+  *)
+    echo "[entrypoint] Unknown HAPPYCLAW_RUNTIME=$HAPPYCLAW_RUNTIME, falling back to agent-runner" >&2
+    RUNNER_DIST=/tmp/dist/index.js
+    ;;
+esac
+runuser -u node -- node "$RUNNER_DIST" < /tmp/input.json

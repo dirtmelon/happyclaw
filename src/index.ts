@@ -60,6 +60,8 @@ import {
   setRegisteredGroup,
   setRouterState,
   setSession,
+  setSessionCursorChatId,
+  getSessionCursorChatId,
   deleteSession,
   storeMessageDirect,
   updateLatestMessageTokenUsage,
@@ -172,6 +174,10 @@ import {
   StreamEvent,
   SubAgent,
 } from './types.js';
+import { resolveGroupRuntime } from './runtime-resolver.js';
+import { resolveCursorModel } from './cursor-model-resolver.js';
+import { listCursorModels } from './cursor-models-list.js';
+import { getResumeId, runtimeForGroup } from './session-resume.js';
 import { logger } from './logger.js';
 import { resolveTaskOwner } from './task-utils.js';
 import {
@@ -325,6 +331,19 @@ export function feedStreamEventToCard(
 }
 
 let globalMessageCursor: MessageCursor = { timestamp: '', id: '' };
+/**
+ * Main-agent resume id cache, keyed by group folder.
+ *
+ * The value is runtime-aware:
+ *   - claude runtime: SDK `session_id` (Claude Agent SDK resume token)
+ *   - cursor runtime: cursor `chat_id` (consumed by `cursor-agent --resume`)
+ *
+ * Lookups/writes go through `getMainAgentResumeId()` /
+ * `recordResumeId()` which dispatch on `resolveGroupRuntime(group)` and
+ * keep the on-disk `sessions` table (separate `session_id` /
+ * `cursor_chat_id` columns) in sync. The in-memory cache is hot-path
+ * only; sub-agents bypass it entirely and read DB directly.
+ */
 let sessions: Record<string, string> = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, MessageCursor> = {};
@@ -348,6 +367,36 @@ function advanceCursors(jid: string, candidate: MessageCursor): void {
   lastCommittedCursor[jid] = target;
   saveState();
 }
+
+/**
+ * Persist the resume id returned by a runner turn. Routes to
+ * `sessions.session_id` (claude SDK resume) or `sessions.cursor_chat_id`
+ * (cursor `--resume <chatId>`) based on the group's resolved runtime.
+ *
+ * The read-side counterpart `getResumeId` lives in `src/session-resume.ts`
+ * (extracted for unit-test reach). The write side stays here because it
+ * also writes the in-memory `sessions[folder]` cache, which is module-local
+ * to this file. That cache is no longer consulted on the spawn path
+ * (`getResumeId` always reads DB now, see P0-2) but is still used elsewhere
+ * inside index.ts as a "session was active / has been reset" marker. Keep
+ * it in sync until that vestigial usage is consolidated.
+ */
+function recordResumeId(
+  group: RegisteredGroup,
+  agentId: string | null | undefined,
+  resumeId: string,
+): void {
+  if (runtimeForGroup(group) === 'cursor') {
+    setSessionCursorChatId(group.folder, agentId, resumeId);
+  } else {
+    setSession(group.folder, resumeId, agentId);
+  }
+  // Main-agent turn: refresh the legacy cache. See note on the function.
+  if (!agentId) {
+    sessions[group.folder] = resumeId;
+  }
+}
+
 let messageLoopRunning = false;
 let ipcWatcherRunning = false;
 let shuttingDown = false;
@@ -1114,9 +1163,130 @@ async function handleCommand(
       return handleDisallowCommand(chatJid, senderImId, mentions);
     case 'allowlist':
       return handleAllowlistCommand(chatJid);
+    case 'model':
+    case 'models':
+      return handleModelCommand(chatJid, rawArgs, senderImId);
     default:
       return null;
   }
+}
+
+/**
+ * `/model` slash command — query / pick the Cursor model for the current
+ * group. Only meaningful when the resolved runtime is `cursor`; for `claude`
+ * groups we explain that the command does not apply.
+ *
+ *   `/model`         → show effective model + how it was resolved + top
+ *                      candidates from the live cursor-agent list.
+ *   `/model <id>`    → pin this group's `cursor_model` to <id>. Validates
+ *                      against the live list when available; on a stale
+ *                      cache miss we still accept and let cursor-agent
+ *                      reject at spawn time (with a clear error in logs).
+ *   `/model reset`   → clear the per-group override (fall back to user/env).
+ *   `/model list`    → just print the candidates (handy on small screens).
+ */
+async function handleModelCommand(
+  chatJid: string,
+  rawArgs: string,
+  senderImId?: string,
+): Promise<string> {
+  const group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
+  if (!group) return '未找到当前工作区';
+  const owner = group.created_by ? getUserById(group.created_by) : undefined;
+  const runtime = resolveGroupRuntime(group, owner);
+  const resolved = resolveCursorModel(group, owner);
+
+  // Mutating commands (`/model <id>`, `/model reset`) change a persistent,
+  // cost-impacting setting (Opus 4.7 Max vs Composer Fast price gap is large),
+  // so we restrict them to the IM channel owner. The owner is recorded as
+  // `group.owner_im_id` when the workspace is auto-registered from a P2P DM.
+  // Read-only forms (`/model` with no args, `/model list`) stay open to all
+  // members so anyone can discover what model the workspace is using.
+  const ownerOnlyArg = rawArgs.trim();
+  const isMutation =
+    ownerOnlyArg.length > 0 && ownerOnlyArg.toLowerCase() !== 'list';
+  if (
+    isMutation &&
+    group.owner_im_id &&
+    (!senderImId || group.owner_im_id !== senderImId)
+  ) {
+    return '只有工作区所有者可以切换模型。/model 或 /model list 可查看候选。';
+  }
+
+  // Where was `resolved` decided? Mirror resolveCursorModel's chain so the
+  // user sees an accurate "为什么是这个模型" line.
+  const sourceLine = (() => {
+    if (group.cursor_model) return `来源: 当前工作区覆盖 (${group.cursor_model})`;
+    if (owner?.cursor_model) return `来源: 用户默认 (${owner.cursor_model})`;
+    if (process.env.CURSOR_MODEL) {
+      return `来源: 部署环境变量 CURSOR_MODEL (${process.env.CURSOR_MODEL})`;
+    }
+    return '来源: 代码内置默认 (claude-opus-4-7-thinking-max)';
+  })();
+
+  const arg = rawArgs.trim();
+  // Read the live list lazily — only when needed, and shared across
+  // /model and /model list. Errors degrade to "candidates unavailable".
+  const fetchCandidates = async () => {
+    try {
+      return await listCursorModels({ force: false });
+    } catch {
+      return null;
+    }
+  };
+
+  if (!arg || arg.toLowerCase() === 'list') {
+    const list = await fetchCandidates();
+    const head =
+      runtime === 'cursor'
+        ? `当前 Cursor 模型: ${resolved}\n${sourceLine}`
+        : `当前 AI Backend: claude (此群未启用 Cursor，/model 命令仅用于 Cursor backend)`;
+    if (!list) {
+      return `${head}\n\n⚠ cursor-agent --list-models 暂时无法访问（cursor-agent 未安装或调用失败）。\n用法：/model <模型 ID>  或  /model reset`;
+    }
+    if (arg.toLowerCase() === 'list') {
+      const lines = list.map(
+        (m) => `· ${m.id}${m.isDefault ? ' (默认)' : ''}${m.isCurrent ? ' (账号当前)' : ''} — ${m.label}`,
+      );
+      return `可用 Cursor 模型 (${list.length} 个):\n${lines.join('\n')}\n\n用法：/model <id> 切换 · /model reset 清除覆盖`;
+    }
+    // Default `/model` — show effective + top candidates (truncated for IM).
+    const top = list.slice(0, 12);
+    const more = list.length > top.length ? ` …还有 ${list.length - top.length} 个，发送 /model list 查看全部` : '';
+    const lines = top.map(
+      (m) => `· ${m.id}${m.isDefault ? ' (默认)' : ''}${m.isCurrent ? ' (账号当前)' : ''}`,
+    );
+    return `${head}\n\n候选模型 (${list.length}):\n${lines.join('\n')}${more}\n\n用法：/model <id> 切换 · /model reset 清除覆盖`;
+  }
+
+  if (arg.toLowerCase() === 'reset') {
+    const updated: RegisteredGroup = { ...group, cursor_model: null };
+    setRegisteredGroup(chatJid, updated);
+    registeredGroups[chatJid] = updated;
+    const newOwner = group.created_by ? getUserById(group.created_by) : undefined;
+    const newResolved = resolveCursorModel(updated, newOwner);
+    return `已清除当前工作区的 Cursor 模型覆盖。\n现在生效: ${newResolved}（${owner?.cursor_model ? '跟随用户默认' : process.env.CURSOR_MODEL ? '跟随环境变量' : '使用代码内置默认'}）`;
+  }
+
+  // /model <id> — validate against the live list when possible.
+  const list = await fetchCandidates();
+  if (list && !list.some((m) => m.id === arg)) {
+    const suggestions = list
+      .filter((m) => m.id.toLowerCase().includes(arg.toLowerCase()))
+      .slice(0, 5)
+      .map((m) => m.id);
+    const hint = suggestions.length > 0
+      ? `\n\n相近的模型: ${suggestions.join(', ')}`
+      : `\n\n发送 /model list 查看全部可用模型。`;
+    return `❌ 未知模型 ID: ${arg}${hint}`;
+  }
+  const updated: RegisteredGroup = { ...group, cursor_model: arg };
+  setRegisteredGroup(chatJid, updated);
+  registeredGroups[chatJid] = updated;
+  const note = runtime === 'cursor'
+    ? '下次发送消息生效（会启动新会话）。'
+    : '注意：当前群组 AI Backend 是 claude，模型选择仅在切到 cursor 时生效。';
+  return `✓ 当前工作区 Cursor 模型已切换到 ${arg}\n${note}`;
 }
 
 async function handleClearCommand(chatJid: string): Promise<string> {
@@ -2199,6 +2369,32 @@ function loadState(): void {
   sessions = getAllSessions();
   registeredGroups = getAllRegisteredGroups();
 
+  // Runtime-aware resume id rehydration: getAllSessions() reads the legacy
+  // `session_id` column (claude SDK token). For groups whose effective runtime
+  // is `cursor`, swap in the persisted `cursor_chat_id` (or drop a stale claude
+  // token) so the in-memory cache matches the runtime that will spawn next.
+  // Owner lookups are batched via a tiny per-loop cache.
+  {
+    const ownerCache = new Map<string, ReturnType<typeof getUserById>>();
+    const ownerOf = (id: string | null | undefined) => {
+      if (!id) return null;
+      if (!ownerCache.has(id)) ownerCache.set(id, getUserById(id));
+      return ownerCache.get(id) ?? null;
+    };
+    for (const group of Object.values(registeredGroups)) {
+      const runtime = resolveGroupRuntime(group, ownerOf(group.created_by));
+      if (runtime !== 'cursor') continue;
+      const cursorChatId = getSessionCursorChatId(group.folder, '');
+      if (cursorChatId) {
+        sessions[group.folder] = cursorChatId;
+      } else {
+        // No cursor chat yet — clear any leftover claude session_id so we don't
+        // hand a Claude resume token to cursor-agent (it would silently 404).
+        delete sessions[group.folder];
+      }
+    }
+  }
+
   // Restore persisted OOM counters
   for (const { key, value } of getRouterStateByPrefix('oom_exits:')) {
     const folder = key.slice('oom_exits:'.length);
@@ -2782,7 +2978,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let output:
     | { status: 'success' | 'error' | 'closed'; error?: string }
     | undefined;
-  let activeSessionId = getSession(effectiveGroup.folder) || undefined;
+  let activeSessionId = getResumeId(effectiveGroup) || undefined;
   // currentSourceJid: tells the agent-runner which IM chat the latest user
   // message came from, so per-channel MCP tools (discord_*, etc.) can detect
   // it correctly even when the home container was originally started by a
@@ -3780,7 +3976,13 @@ async function runAgent(
   const isHome = !!group.is_home;
   // For the agent-runner: isMain means this is an admin home container (full privileges)
   const isAdminHome = isHome && group.folder === MAIN_GROUP_FOLDER;
-  const sessionId = sessions[group.folder];
+  // Always go through getResumeId so the value reflects the current
+  // resolved runtime — `sessions[group.folder]` is a hot-path cache only,
+  // and a runtime PATCH (e.g. user toggles backend in ChatView) does NOT
+  // evict it. Without this indirection, switching cursor → claude (or vice
+  // versa) hands the new runner a stale resume id from the wrong column,
+  // which the SDK rejects as "session not found" (see P0-2 in code review).
+  const sessionId = getResumeId(group);
 
   // Update tasks snapshot for container to read (filtered by group)
   const tasks = getAllTasks();
@@ -3822,8 +4024,7 @@ async function runAgent(
         // 仅从成功的输出中更新 session ID；
         // error 输出可能携带 stale ID，会覆盖流式传递的有效 session
         if (output.newSessionId && output.status !== 'error') {
-          sessions[group.folder] = output.newSessionId;
-          setSession(group.folder, output.newSessionId);
+          recordResumeId(group, undefined, output.newSessionId);
         }
         await onOutput(output);
       }
@@ -3897,8 +4098,7 @@ async function runAgent(
     // 仅从成功的最终输出中更新 session ID；
     // error 状态的输出可能携带 stale ID，覆盖流式阶段已写入的有效 session
     if (output.newSessionId && output.status !== 'error') {
-      sessions[group.folder] = output.newSessionId;
-      setSession(group.folder, output.newSessionId);
+      recordResumeId(group, undefined, output.newSessionId);
     }
 
     // Agent was interrupted by _close sentinel (home folder drain).
@@ -5725,13 +5925,13 @@ async function processAgentConversation(
   };
 
   // Get or use agent-specific session
-  const sessionId = getSession(effectiveGroup.folder, agentId) || undefined;
+  const sessionId = getResumeId(effectiveGroup, agentId) || undefined;
   let currentAgentSessionId = sessionId;
 
   const wrappedOnOutput = async (output: ContainerOutput) => {
     // Track session
     if (output.newSessionId && output.status !== 'error') {
-      setSession(effectiveGroup.folder, output.newSessionId, agentId);
+      recordResumeId(effectiveGroup, agentId, output.newSessionId);
       currentAgentSessionId = output.newSessionId;
     }
 
@@ -6141,7 +6341,7 @@ async function processAgentConversation(
 
     // Finalize session
     if (output.newSessionId && output.status !== 'error') {
-      setSession(effectiveGroup.folder, output.newSessionId, agentId);
+      recordResumeId(effectiveGroup, agentId, output.newSessionId);
     }
 
     // 不可恢复的转录错误（如超大图片/MIME 错配被固化在会话历史中）

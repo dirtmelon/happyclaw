@@ -81,7 +81,11 @@ export interface WeChatConnectOpts {
   onReady?: () => void;
   onNewChat: (jid: string, name: string) => void;
   ignoreMessagesBefore?: number;
-  onCommand?: (chatJid: string, command: string) => Promise<string | null>;
+  onCommand?: (
+    chatJid: string,
+    command: string,
+    senderImId?: string,
+  ) => Promise<string | null>;
   resolveGroupFolder?: (jid: string) => string | undefined;
   resolveEffectiveChatJid?: (
     chatJid: string,
@@ -582,7 +586,10 @@ export function createWeChatConnection(
           slashMatch[1] + (slashMatch[2] ? ' ' + slashMatch[2] : '')
         ).trim();
         try {
-          const reply = await opts.onCommand(jid, cmdBody);
+          // WeChat is 1:1 — `fromUserId` IS the sender. Plumb it so handlers
+          // like `/model` can do owner checks (matches `/owner_mention`
+          // storage; `/allow` is Feishu-only).
+          const reply = await opts.onCommand(jid, cmdBody, fromUserId);
           if (reply) {
             const ct = contextTokenCache.get(fromUserId);
             if (ct) {

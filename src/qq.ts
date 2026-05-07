@@ -261,7 +261,11 @@ export interface QQConnectOpts {
     chatName: string,
     code: string,
   ) => Promise<boolean>;
-  onCommand?: (chatJid: string, command: string) => Promise<string | null>;
+  onCommand?: (
+    chatJid: string,
+    command: string,
+    senderImId?: string,
+  ) => Promise<string | null>;
   resolveGroupFolder?: (jid: string) => string | undefined;
   resolveEffectiveChatJid?: (
     chatJid: string,
@@ -1421,7 +1425,11 @@ export function createQQConnection(config: QQConnectionConfig): QQConnection {
           slashMatch[1] + (slashMatch[2] ? ' ' + slashMatch[2] : '')
         ).trim();
         try {
-          const reply = await opts.onCommand(jid, cmdBody);
+          // C2C: the user's open_id IS the sender. Plumb it so handlers like
+          // `/model` can compare to `group.owner_im_id` (which on QQ is set
+          // via `/owner_mention`, since `/allow`'s backfill path only knows
+          // how to read Feishu user config).
+          const reply = await opts.onCommand(jid, cmdBody, userOpenId);
           if (reply) {
             await sendQQMessage('c2c', userOpenId, markdownToPlainText(reply));
             return;
@@ -1582,7 +1590,12 @@ export function createQQConnection(config: QQConnectionConfig): QQConnection {
           slashMatch[1] + (slashMatch[2] ? ' ' + slashMatch[2] : '')
         ).trim();
         try {
-          const reply = await opts.onCommand(jid, cmdBody);
+          // Group: pass the sender's per-group member_openid (declared above)
+          // so `/model <id>`-style owner checks compare against the same
+          // value that `/owner_mention` writes into `group.owner_im_id`.
+          // Note: QQ's member_openid is per-group; the same user has different
+          // ids in different QQ groups (platform limit, not bug).
+          const reply = await opts.onCommand(jid, cmdBody, memberOpenId);
           if (reply) {
             await sendQQMessage(
               'group',

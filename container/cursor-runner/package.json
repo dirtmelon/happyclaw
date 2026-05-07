@@ -1,0 +1,17 @@
+{
+  "name": "happyclaw-cursor-runner",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Container/host-side runner that drives the Cursor backend via cursor-agent CLI. Mirrors the stdin/stdout/IPC protocol of agent-runner so happyclaw can spawn either runner interchangeably.",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^22.10.7",
+    "typescript": "^5.9.3"
+  },
+  "license": "MIT"
+}

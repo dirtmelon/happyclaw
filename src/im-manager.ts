@@ -455,7 +455,11 @@ class IMConnectionManager {
       code: string,
     ) => Promise<boolean>,
     options?: {
-      onCommand?: (chatJid: string, command: string) => Promise<string | null>;
+      onCommand?: (
+        chatJid: string,
+        command: string,
+        senderImId?: string,
+      ) => Promise<string | null>;
       ignoreMessagesBefore?: number;
       resolveGroupFolder?: (jid: string) => string | undefined;
       resolveEffectiveChatJid?: (
@@ -507,7 +511,11 @@ class IMConnectionManager {
       code: string,
     ) => Promise<boolean>,
     options?: {
-      onCommand?: (chatJid: string, command: string) => Promise<string | null>;
+      onCommand?: (
+        chatJid: string,
+        command: string,
+        senderImId?: string,
+      ) => Promise<string | null>;
       resolveGroupFolder?: (jid: string) => string | undefined;
       resolveEffectiveChatJid?: (
         chatJid: string,
@@ -560,7 +568,11 @@ class IMConnectionManager {
     onNewChat: (chatJid: string, chatName: string) => void,
     options?: {
       ignoreMessagesBefore?: number;
-      onCommand?: (chatJid: string, command: string) => Promise<string | null>;
+      onCommand?: (
+        chatJid: string,
+        command: string,
+        senderImId?: string,
+      ) => Promise<string | null>;
       resolveGroupFolder?: (jid: string) => string | undefined;
       resolveEffectiveChatJid?: (
         chatJid: string,
@@ -607,7 +619,11 @@ class IMConnectionManager {
     onNewChat: (chatJid: string, chatName: string) => void,
     options?: {
       ignoreMessagesBefore?: number;
-      onCommand?: (chatJid: string, command: string) => Promise<string | null>;
+      onCommand?: (
+        chatJid: string,
+        command: string,
+        senderImId?: string,
+      ) => Promise<string | null>;
       resolveGroupFolder?: (jid: string) => string | undefined;
       resolveEffectiveChatJid?: (
         chatJid: string,
@@ -662,7 +678,11 @@ class IMConnectionManager {
     options?: {
       ignoreMessagesBefore?: number;
       isChatAuthorized?: (jid: string) => boolean;
-      onCommand?: (chatJid: string, command: string) => Promise<string | null>;
+      onCommand?: (
+        chatJid: string,
+        command: string,
+        senderImId?: string,
+      ) => Promise<string | null>;
       resolveGroupFolder?: (jid: string) => string | undefined;
       resolveEffectiveChatJid?: (chatJid: string) => { effectiveJid: string; agentId: string | null } | null;
       onAgentMessage?: (baseChatJid: string, agentId: string) => void;

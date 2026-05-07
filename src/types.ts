@@ -46,12 +46,44 @@ export interface FeishuMessageMeta {
   text?: string;
 }
 
+/**
+ * Agent backend runtime. `claude` runs the agent through agent-runner +
+ * @anthropic-ai/claude-agent-sdk; `cursor` (future) runs through
+ * cursor-runner + cursor-agent CLI. Both backends consume the same
+ * happyclaw-mcp-server stdio MCP tools (see Step 1 plan).
+ */
+export type Runtime = 'claude' | 'cursor';
+
+/** Allowed values for `Runtime` — useful for runtime guards and UI dropdowns. */
+export const RUNTIMES: Runtime[] = ['claude', 'cursor'];
+
+export const DEFAULT_RUNTIME: Runtime = 'claude';
+
 export interface RegisteredGroup {
   name: string;
   folder: string;
   added_at: string;
   containerConfig?: ContainerConfig;
   executionMode?: ExecutionMode; // 默认 'container'
+  /**
+   * Agent backend override for this group. `undefined` / `null` means follow
+   * the group owner's `User.default_runtime`. Resolved via
+   * `resolveGroupRuntime()` in `src/runtime-resolver.ts`.
+   */
+  runtime?: Runtime | null;
+  /**
+   * Cursor model override for this group (only effective when the resolved
+   * runtime is `cursor`). `undefined` / `null` means follow the group owner's
+   * `User.cursor_model` → process env `CURSOR_MODEL` → hard-coded default
+   * (`claude-opus-4-7-thinking-max`). Resolved via `resolveCursorModel()` in
+   * `src/cursor-model-resolver.ts`.
+   *
+   * Validation against the dynamic list returned by GET /api/config/cursor-models
+   * happens at the route layer; the value stored here is whatever the operator
+   * picked at the time. Stale model IDs (model removed by Cursor between
+   * subscription windows) fall back to the user/env/default at runtime.
+   */
+  cursor_model?: string | null;
   customCwd?: string; // 宿主机模式的自定义工作目录（绝对路径）
   initSourcePath?: string; // 容器模式下复制来源的宿主机绝对路径
   initGitUrl?: string; // 容器模式下 clone 来源的 Git URL
@@ -206,6 +238,18 @@ export interface User {
   ai_avatar_emoji: string | null;
   ai_avatar_color: string | null;
   ai_avatar_url: string | null;
+  /**
+   * Per-user default agent backend. Falls back to `DEFAULT_RUNTIME` when the
+   * column is absent (legacy rows pre-v38). Overridable per-group via
+   * `RegisteredGroup.runtime`.
+   */
+  default_runtime: Runtime;
+  /**
+   * Per-user default Cursor model (only consulted when the resolved runtime
+   * is `cursor`). `null` = inherit `process.env.CURSOR_MODEL` → hard-coded
+   * default. See `resolveCursorModel()` for the full chain.
+   */
+  cursor_model: string | null;
   created_at: string;
   updated_at: string;
   last_login_at: string | null;
@@ -229,6 +273,11 @@ export interface UserPublic {
   ai_avatar_emoji: string | null;
   ai_avatar_color: string | null;
   ai_avatar_url: string | null;
+  /** Per-user default agent backend, surfaced to the Web UI so the settings
+   * page can show / let the user change it. See `Runtime` type. */
+  default_runtime: Runtime;
+  /** Per-user default Cursor model. `null` = inherit env / hard-coded default. */
+  cursor_model: string | null;
   created_at: string;
   last_login_at: string | null;
   last_active_at: string | null;

@@ -115,6 +115,37 @@ ARG CACHEBUST=1
 RUN npm install -g agent-browser
 RUN npm install
 
+# Pre-stage happyclaw-mcp-server (independent npm project). Copying only
+# the package.json first lets npm install be cached across source-only
+# changes; entrypoint.sh recompiles src on every container start anyway.
+RUN mkdir -p /app/mcp-server
+COPY happyclaw-mcp-server/package.json /app/mcp-server/package.json
+RUN cd /app/mcp-server && npm install
+
+# Pre-stage cursor-runner (independent npm project, no SDK deps).
+RUN mkdir -p /app/cursor-runner
+COPY cursor-runner/package.json /app/cursor-runner/package.json
+RUN cd /app/cursor-runner && npm install
+
+# Where agent-runner expects to spawn the standalone MCP server.
+# entrypoint.sh recompiles src to /tmp/mcp-server-dist (host-mounted src
+# overrides the baked-in copy), so we point at the runtime location.
+ENV HAPPYCLAW_MCP_SERVER_DIST=/tmp/mcp-server-dist/index.js
+
+# Install cursor-agent CLI for the Cursor-runtime path. The official install
+# script drops the binary into ~/.local/bin which only root can write at
+# build time; copy it into a system PATH so the unprivileged `node` user can
+# invoke it. Pinning a version is intentionally avoided — cursor-agent
+# evolves quickly and the runner only requires the documented `--print
+# --output-format=stream-json` interface, which has been stable across
+# releases. Re-runs are gated by CACHEBUST above.
+RUN set -e && \
+    HOME=/root curl https://cursor.com/install -fsS | HOME=/root bash && \
+    cp /root/.local/bin/cursor-agent /usr/local/bin/cursor-agent && \
+    chmod a+rx /usr/local/bin/cursor-agent && \
+    cursor-agent --version
+ENV CURSOR_AGENT_BIN=/usr/local/bin/cursor-agent
+
 # Install feishu-cli (binary + builtin skills), 始终跟踪 latest release。
 # 通过 302 redirect 从 github.com/releases/latest 的 Location header 提取 tag
 # （和 install.sh 作者自己用的技巧一致），不经 api.github.com 规避 rate limit。
@@ -143,6 +174,16 @@ COPY agent-runner/ ./
 
 # Build TypeScript
 RUN npm run build
+
+# Copy and pre-build happyclaw-mcp-server source as a baseline. entrypoint.sh
+# recompiles to /tmp/mcp-server-dist on every start so host-mounted src wins.
+COPY happyclaw-mcp-server/ /app/mcp-server/
+RUN cd /app/mcp-server && npm run build
+
+# Copy and pre-build cursor-runner source as a baseline. entrypoint.sh
+# recompiles to /tmp/cursor-runner-dist when $HAPPYCLAW_RUNTIME=cursor.
+COPY cursor-runner/ /app/cursor-runner/
+RUN cd /app/cursor-runner && npm run build
 
 # Create workspace directories
 RUN mkdir -p /workspace/group /workspace/global /workspace/memory /workspace/extra /workspace/ipc/messages /workspace/ipc/tasks /workspace/ipc/input

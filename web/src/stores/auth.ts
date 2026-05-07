@@ -1,6 +1,26 @@
 import { create } from 'zustand';
 import { api, apiFetch } from '../api/client';
 import { clearApiCaches } from '../utils/pwaCache';
+import { useCursorModelsStore } from './cursor-models';
+
+/**
+ * Reset cross-tenant in-memory caches that survive a logout/login on the
+ * same device. `clearApiCaches` handles PWA service-worker caches; this one
+ * handles Zustand stores that don't auto-rehydrate per user. Today only
+ * `cursor-models` qualifies (the model list itself is per cursor-agent
+ * account, but this happyclaw instance has only one cursor-agent identity,
+ * so the data isn't tenant-sensitive *yet*; once Step 6+ introduces
+ * per-user CURSOR_API_KEY, leaving stale data here would leak one user's
+ * subscription tier to the next).
+ */
+function resetTenantInMemoryStores(): void {
+  useCursorModelsStore.setState({
+    models: [],
+    fetchedAt: null,
+    error: null,
+    loading: false,
+  });
+}
 
 export type Permission =
   | 'manage_system_config'
@@ -9,6 +29,11 @@ export type Permission =
   | 'manage_invites'
   | 'view_audit_log'
   | 'manage_billing';
+
+/** Agent backend selector. Mirrors the `Runtime` type in src/types.ts. */
+export type Runtime = 'claude' | 'cursor';
+
+export const DEFAULT_RUNTIME: Runtime = 'claude';
 
 export interface UserPublic {
   id: string;
@@ -31,6 +56,11 @@ export interface UserPublic {
   ai_avatar_emoji: string | null;
   ai_avatar_color: string | null;
   ai_avatar_url: string | null;
+  /** Per-user default agent backend; falls back to 'claude' for legacy
+   * accounts that pre-date the Step 2 schema migration. */
+  default_runtime: Runtime;
+  /** Per-user default Cursor model. `null` = inherit env / hard default. */
+  cursor_model: string | null;
 }
 
 export interface AppearanceConfig {
@@ -60,7 +90,22 @@ interface AuthState {
   checkStatus: () => Promise<void>;
   setupAdmin: (username: string, password: string) => Promise<void>;
   changePassword: (currentPassword: string, newPassword: string) => Promise<void>;
-  updateProfile: (payload: { username?: string; display_name?: string; avatar_emoji?: string | null; avatar_color?: string | null; avatar_url?: string | null; ai_name?: string | null; ai_avatar_emoji?: string | null; ai_avatar_color?: string | null; ai_avatar_url?: string | null }) => Promise<void>;
+  updateProfile: (payload: {
+    username?: string;
+    display_name?: string;
+    avatar_emoji?: string | null;
+    avatar_color?: string | null;
+    avatar_url?: string | null;
+    ai_name?: string | null;
+    ai_avatar_emoji?: string | null;
+    ai_avatar_color?: string | null;
+    ai_avatar_url?: string | null;
+    default_runtime?: Runtime;
+    /** Pass `null` to clear the per-user override (fall back to env /
+     * hard-coded default). Pass a model id (e.g. `'claude-opus-4-7-thinking-max'`)
+     * to pin per-user. Omit to leave unchanged. */
+    cursor_model?: string | null;
+  }) => Promise<void>;
   uploadAvatar: (file: File, target?: 'user' | 'ai') => Promise<string>;
   fetchAppearance: () => Promise<void>;
   hasPermission: (permission: Permission) => boolean;
@@ -81,6 +126,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     // (e.g. they closed the browser without logout). Without this, the new
     // user could see the previous user's data on first frame from SWR cache.
     await clearApiCaches();
+    resetTenantInMemoryStores();
     const data = await api.post<{ success: boolean; user: UserPublic; setupStatus?: SetupStatus; appearance?: AppearanceConfig }>(
       '/api/auth/login',
       { username, password },
@@ -91,6 +137,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   register: async (payload) => {
     // Same rationale as login: belt-and-suspenders cache clear on tenant switch.
     await clearApiCaches();
+    resetTenantInMemoryStores();
     const data = await api.post<{ success: boolean; user: UserPublic }>('/api/auth/register', payload);
     set({ authenticated: true, user: data.user, setupStatus: null, initialized: true });
   },
@@ -100,6 +147,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     // Clear AFTER server-side session is invalidated so subsequent users on
     // this device don't see this user's cached messages/agents/profile.
     await clearApiCaches();
+    resetTenantInMemoryStores();
     set({ authenticated: false, user: null, setupStatus: null, appearance: null, initialized: true });
   },
 

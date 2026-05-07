@@ -57,6 +57,16 @@ const IPC_INPUT_DIR = path.join(WORKSPACE_IPC, 'input');
 const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
 const IPC_FALLBACK_POLL_MS = 5000; // 后备轮询间隔（仅防止 inotify 事件丢失）
 
+// MCP 切换：默认走独立 stdio MCP server (happyclaw-mcp-server)。
+// 设置 HAPPYCLAW_USE_LEGACY_MCP=1 切回同进程 createSdkMcpServer 路径作为紧急回滚。
+// 稳定一个 release 周期后将删除 legacy 路径。
+const USE_LEGACY_MCP = process.env.HAPPYCLAW_USE_LEGACY_MCP === '1';
+const MCP_SERVER_DIST = process.env.HAPPYCLAW_MCP_SERVER_DIST || '';
+// 共享 context 文件：agent-runner 主进程在每次 IPC turn 开始前 atomic write，
+// happyclaw-mcp-server 子进程在每次工具调用入口处读取，从而把 mutable
+// chatJid/currentTaskId/isScheduledTask 跨进程传递。
+const MCP_CONTEXT_FILE = path.join(WORKSPACE_IPC, 'current-context.json');
+
 
 let needsMemoryFlush = false;
 let hadCompaction = false;
@@ -235,6 +245,33 @@ function filterOversizedImages(
     }
   }
   return { valid, rejected };
+}
+
+/**
+ * Atomically write the mutable MCP context (chatJid / currentTaskId /
+ * isScheduledTask) so the standalone happyclaw-mcp-server picks it up on the
+ * next tool call. No-op when running in legacy in-process MCP mode.
+ *
+ * Called every time the main loop mutates `mcpToolsConfig.chatJid` /
+ * `mcpToolsConfig.currentTaskId` so the stdio child sees the same value the
+ * legacy closure-mutation path would.
+ */
+function writeMcpContext(snapshot: {
+  chatJid: string;
+  currentTaskId: string | null;
+  isScheduledTask: boolean;
+}): void {
+  if (USE_LEGACY_MCP) return;
+  try {
+    fs.mkdirSync(WORKSPACE_IPC, { recursive: true });
+    const tmp = MCP_CONTEXT_FILE + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(snapshot));
+    fs.renameSync(tmp, MCP_CONTEXT_FILE);
+  } catch (err) {
+    // Non-fatal: stdio child will fall back to its initial flags. Log so
+    // operators notice if it persists.
+    log(`writeMcpContext failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 /**
@@ -1567,15 +1604,17 @@ async function main(): Promise<void> {
   // 禁用 HappyClaw 记忆层：不注册 memory MCP 工具，让 Agent 按用户本机 Playbook 行事
   const disableMemoryLayer = process.env.HAPPYCLAW_DISABLE_MEMORY_LAYER === 'true';
 
-  // Create in-process SDK MCP server (replaces the stdio subprocess)
-  // NOTE: chatJid and currentTaskId are mutated in-place by the main loop
-  // below so that createMcpTools() closures observe updates via ctx reference.
-  // See the per-turn updates at the bottom of the query loop.
+  // MCP server configuration (legacy in-process vs new standalone stdio).
   //
   // chatJid is initialized to the IM source of the message that triggered
   // this run (when known) — falls back to the container's startup chatJid.
   // This lets per-channel MCP tools (discord_*, etc.) see the actual incoming
   // chat even when the home container is shared across channels.
+  //
+  // mcpToolsConfig is kept regardless of which path is active because the
+  // legacy SDK path closure-mutates it in-place and the new path uses it
+  // as a snapshot source for writeMcpContext() — the latter requires the
+  // exact same field set so legacy and stdio modes remain interchangeable.
   const mcpToolsConfig = {
     chatJid: containerInput.currentSourceJid || containerInput.chatJid,
     groupFolder: containerInput.groupFolder,
@@ -1589,11 +1628,70 @@ async function main(): Promise<void> {
     workspaceMemory: WORKSPACE_MEMORY,
     disableMemoryLayer,
   };
-  const buildMcpServerConfig = () => createSdkMcpServer({
-    name: 'happyclaw',
-    version: '1.0.0',
-    tools: createMcpTools(mcpToolsConfig),
-  });
+
+  // Build mcpServers.happyclaw entry. New (default) path: stdio child
+  // process running container/happyclaw-mcp-server/dist/index.js with the
+  // static context as CLI flags. Legacy path: createSdkMcpServer registers
+  // tools in-process via createMcpTools(mcpToolsConfig).
+  const buildStdioMcpEntry = () => {
+    if (!MCP_SERVER_DIST) {
+      throw new Error(
+        'HAPPYCLAW_MCP_SERVER_DIST not set. Either provide the env var ' +
+        'pointing at happyclaw-mcp-server/dist/index.js, or set ' +
+        'HAPPYCLAW_USE_LEGACY_MCP=1 to use the in-process fallback.',
+      );
+    }
+    const args: string[] = [
+      MCP_SERVER_DIST,
+      '--group-folder', mcpToolsConfig.groupFolder,
+      '--workspace-group', mcpToolsConfig.workspaceGroup,
+      '--workspace-ipc', mcpToolsConfig.workspaceIpc,
+      '--workspace-global', mcpToolsConfig.workspaceGlobal,
+      '--workspace-memory', mcpToolsConfig.workspaceMemory,
+      '--chat-jid', mcpToolsConfig.chatJid,
+      '--is-home', String(mcpToolsConfig.isHome),
+      '--is-admin-home', String(mcpToolsConfig.isAdminHome),
+    ];
+    if (mcpToolsConfig.isScheduledTask) args.push('--is-scheduled-task');
+    if (mcpToolsConfig.disableMemoryLayer) args.push('--disable-memory-layer');
+    return {
+      type: 'stdio' as const,
+      command: 'node',
+      args,
+    };
+  };
+
+  const buildMcpServerConfig = () =>
+    USE_LEGACY_MCP
+      ? createSdkMcpServer({
+          name: 'happyclaw',
+          version: '1.0.0',
+          tools: createMcpTools(mcpToolsConfig),
+        })
+      : (buildStdioMcpEntry() as unknown as ReturnType<typeof createSdkMcpServer>);
+
+  // Helper: snapshot the mutable subset of mcpToolsConfig to the shared
+  // context file. Call after every mutation of chatJid / currentTaskId /
+  // isScheduledTask so the stdio MCP child sees the same value the legacy
+  // closure-mutation path would.
+  const syncMcpContext = (): void => {
+    writeMcpContext({
+      chatJid: mcpToolsConfig.chatJid,
+      currentTaskId: mcpToolsConfig.currentTaskId,
+      isScheduledTask: mcpToolsConfig.isScheduledTask,
+    });
+  };
+
+  // Initial context file write so the stdio child sees the right values
+  // even if it starts before the main loop reaches its first mutation.
+  syncMcpContext();
+
+  log(
+    USE_LEGACY_MCP
+      ? 'MCP backend: legacy in-process createSdkMcpServer'
+      : `MCP backend: stdio child (${MCP_SERVER_DIST || 'NOT-SET'})`,
+  );
+
   let mcpServerConfig = buildMcpServerConfig();
   const memoryRecallPrompt = buildMemoryRecallPrompt(isHome, disableMemoryLayer);
   fs.mkdirSync(IPC_INPUT_DIR, { recursive: true });
@@ -1633,7 +1731,7 @@ async function main(): Promise<void> {
     // override the startup chatJid so per-channel MCP tools see it correctly.
     for (let i = pendingDrain.messages.length - 1; i >= 0; i--) {
       const sj = pendingDrain.messages[i].sourceJid;
-      if (sj) { mcpToolsConfig.chatJid = sj; break; }
+      if (sj) { mcpToolsConfig.chatJid = sj; syncMcpContext(); break; }
     }
   }
 
@@ -1817,6 +1915,7 @@ async function main(): Promise<void> {
         mcpToolsConfig.currentTaskId = nextMessage.taskId ?? null;
         // Update chatJid so per-channel MCP tools see the correct incoming chat.
         if (nextMessage.sourceJid) mcpToolsConfig.chatJid = nextMessage.sourceJid;
+        syncMcpContext();
         // Rebuild MCP server to avoid "Already connected to a transport" error
         // when the previous query was aborted mid-stream (#421).
         mcpServerConfig = buildMcpServerConfig();
@@ -1980,6 +2079,7 @@ async function main(): Promise<void> {
       mcpToolsConfig.currentTaskId = nextMessage.taskId ?? null;
       // Update chatJid so per-channel MCP tools see the correct incoming chat.
       if (nextMessage.sourceJid) mcpToolsConfig.chatJid = nextMessage.sourceJid;
+      syncMcpContext();
     }
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : String(err);

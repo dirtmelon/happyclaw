@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 import { useChatStore } from '../../stores/chat';
 import { useAuthStore } from '../../stores/auth';
+import { useCursorModels } from '../../stores/cursor-models';
 import { MessageList } from './MessageList';
 import { MessageInput } from './MessageInput';
 import { FilePanel } from './FilePanel';
@@ -123,9 +124,70 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   const agentHasMore = useChatStore(s => s.agentHasMore);
 
   const markChatRead = useChatStore(s => s.markChatRead);
+  const setGroupRuntime = useChatStore(s => s.setGroupRuntime);
+  const setGroupCursorModel = useChatStore(s => s.setGroupCursorModel);
 
   const currentUser = useAuthStore(s => s.user);
   const canUseTerminal = group?.execution_mode !== 'host';
+  // Effective runtime: per-group override wins, otherwise user's default
+  // (mirrors `resolveGroupRuntime()` on the host side).
+  const effectiveRuntime: 'claude' | 'cursor' =
+    group?.runtime ?? currentUser?.default_runtime ?? 'claude';
+  const isRuntimeOverridden = !!group?.runtime;
+  const handleToggleRuntime = useCallback(async () => {
+    if (!groupJid) return;
+    const next: 'claude' | 'cursor' =
+      effectiveRuntime === 'claude' ? 'cursor' : 'claude';
+    const ok = window.confirm(
+      `切换到 ${next === 'claude' ? 'Claude' : 'Cursor'} backend？\n\n` +
+        `下次发送消息会启动新会话；历史消息保留可见，新回复不带旧上下文。`,
+    );
+    if (!ok) return;
+    try {
+      // Pin the group to the new runtime (rather than clearing the override)
+      // so the choice survives later changes to the user's default_runtime.
+      await setGroupRuntime(groupJid, next);
+      toast.success(
+        `工作区已切换到 ${next === 'claude' ? 'Claude' : 'Cursor'}`,
+      );
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : '切换 AI Backend 失败',
+      );
+    }
+  }, [groupJid, effectiveRuntime, setGroupRuntime]);
+
+  // Effective Cursor model — only displayed when runtime resolves to cursor.
+  // Mirrors backend resolveCursorModel() in priority order: per-group override
+  // → user default → "(env / 默认)" sentinel string for the badge.
+  const effectiveCursorModel: string =
+    group?.cursor_model ||
+    currentUser?.cursor_model ||
+    'claude-opus-4-7-thinking-max';
+  const isCursorModelOverridden = !!group?.cursor_model;
+  const cursorModels = useCursorModels();
+
+  const handlePickCursorModel = useCallback(
+    async (next: string) => {
+      if (!groupJid) return;
+      // Empty string from the dropdown's reset row → null (clear group override).
+      const value = next.trim().length > 0 ? next.trim() : null;
+      if (value === (group?.cursor_model ?? null)) return;
+      try {
+        await setGroupCursorModel(groupJid, value);
+        toast.success(
+          value === null
+            ? `工作区已清除 Cursor 模型覆盖`
+            : `工作区 Cursor 模型已切换到 ${value}`,
+        );
+      } catch (err) {
+        toast.error(
+          err instanceof Error ? err.message : '切换 Cursor 模型失败',
+        );
+      }
+    },
+    [groupJid, group?.cursor_model, setGroupCursorModel],
+  );
   const pollRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   // Sidebar: members tab visibility
@@ -509,6 +571,93 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
                 <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-[10px] font-medium border ${group.execution_mode === 'host' ? 'bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/30 dark:text-amber-300 dark:border-amber-800' : 'bg-sky-50 text-sky-700 border-sky-200 dark:bg-sky-950/30 dark:text-sky-300 dark:border-sky-800'}`}>
                   {group.execution_mode === 'host' ? '宿主机' : 'Docker'}
                 </span>
+              </>
+            )}
+            {!isWaiting && (
+              <>
+                <span className="text-muted-foreground/40">·</span>
+                <button
+                  type="button"
+                  onClick={handleToggleRuntime}
+                  title={(() => {
+                    // The runtime stack is operator-visible truth; the LLM's
+                    // self-introduction is unreliable (training-data bias).
+                    // Show the actual binary + model so users have a quick
+                    // ground-truth check independent of what the assistant
+                    // says about itself.
+                    // Effective Cursor model is shown as a separate badge
+                    // (next to this one when runtime=cursor); we only label
+                    // the stack here so the tooltip stays short.
+                    const stack =
+                      effectiveRuntime === 'cursor'
+                        ? 'Cursor · cursor-agent CLI'
+                        : 'Claude · @anthropic-ai/claude-agent-sdk';
+                    const origin = isRuntimeOverridden ? '已覆盖默认' : '跟随用户默认';
+                    return `当前 AI Backend: ${stack}（${origin}）。点击切换。\n注意: AI 的自我介绍可能不准确,以此处显示的为准。`;
+                  })()}
+                  className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-medium border cursor-pointer transition-colors ${
+                    effectiveRuntime === 'cursor'
+                      ? 'bg-violet-50 text-violet-700 border-violet-200 hover:bg-violet-100 dark:bg-violet-950/30 dark:text-violet-300 dark:border-violet-800'
+                      : 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100 dark:bg-emerald-950/30 dark:text-emerald-300 dark:border-emerald-800'
+                  }`}
+                >
+                  {effectiveRuntime === 'cursor' ? 'Cursor' : 'Claude'}
+                  {isRuntimeOverridden && (
+                    <span className="text-[8px] opacity-60">·覆盖</span>
+                  )}
+                </button>
+                {/* Cursor model picker — only when runtime resolves to cursor.
+                    Native <select> for keyboard accessibility + mobile UX
+                    (matches macOS/iOS native dropdown). The ground-truth model
+                    name lives here; the tooltip on the badge stays short. */}
+                {effectiveRuntime === 'cursor' && (
+                  <>
+                    <span className="text-muted-foreground/40">·</span>
+                    <div
+                      className={`relative inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-medium border transition-colors ${
+                        isCursorModelOverridden
+                          ? 'bg-violet-100 text-violet-800 border-violet-300 dark:bg-violet-900/40 dark:text-violet-200 dark:border-violet-700'
+                          : 'bg-violet-50 text-violet-700 border-violet-200 dark:bg-violet-950/30 dark:text-violet-300 dark:border-violet-800'
+                      }`}
+                      title={(() => {
+                        const origin = isCursorModelOverridden
+                          ? '当前工作区已覆盖默认'
+                          : group?.cursor_model
+                            ? '群组级覆盖'
+                            : currentUser?.cursor_model
+                              ? '跟随用户默认'
+                              : '使用部署默认 (CURSOR_MODEL env / hardcoded)';
+                        return `Cursor 模型: ${effectiveCursorModel}（${origin}）。点击下拉切换。`;
+                      })()}
+                    >
+                      <select
+                        value={group?.cursor_model ?? ''}
+                        onChange={(e) => void handlePickCursorModel(e.target.value)}
+                        className="absolute inset-0 opacity-0 cursor-pointer"
+                        aria-label="Cursor model picker"
+                      >
+                        <option value="">
+                          {currentUser?.cursor_model
+                            ? `跟随用户默认 (${currentUser.cursor_model})`
+                            : '使用部署默认'}
+                        </option>
+                        {cursorModels.loading && cursorModels.models.length === 0 && (
+                          <option disabled>加载中…</option>
+                        )}
+                        {cursorModels.models.map((m) => (
+                          <option key={m.id} value={m.id}>
+                            {m.label} — {m.id}
+                          </option>
+                        ))}
+                      </select>
+                      <span className="pointer-events-none">{effectiveCursorModel}</span>
+                      {isCursorModelOverridden && (
+                        <span className="pointer-events-none text-[8px] opacity-60">·覆盖</span>
+                      )}
+                      <span className="pointer-events-none text-[8px] opacity-60">▾</span>
+                    </div>
+                  </>
+                )}
               </>
             )}
             {isOwnHome && imStatus && Object.entries(imStatus).some(([, v]) => v) && (

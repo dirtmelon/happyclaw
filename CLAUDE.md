@@ -45,7 +45,8 @@ HappyClaw 是一个自托管的多用户 AI Agent 系统：
 | `src/task-scheduler.ts` | 定时调度：60s 轮询、cron / interval / once 三种模式、group / isolated 上下文 |
 | `src/file-manager.ts` | 文件安全：路径遍历防护、符号链接检测、系统路径保护（`logs/`、`CLAUDE.md`、`.claude/`、`conversations/`） |
 | `src/mount-security.ts` | 挂载安全：白名单校验、黑名单模式匹配（`.ssh`、`.gnupg` 等）、非主会话只读强制 |
-| `src/db.ts` | 数据层：SQLite WAL 模式、Schema 版本校验（v1→v24）、核心表定义 |
+| `src/db.ts` | 数据层：SQLite WAL 模式、Schema 版本校验（v1→v38）、核心表定义 |
+| `src/runtime-resolver.ts` | `resolveGroupRuntime(group, user)`：按 per-group → per-user → DEFAULT_RUNTIME 顺序解析 Agent backend |
 | `src/auth.ts` | 密码工具：bcrypt 哈希/验证、Session Token 生成、用户名/密码校验 |
 | `src/permissions.ts` | 权限常量和模板定义（`ALL_PERMISSIONS`、`PERMISSION_TEMPLATES`） |
 | `src/schemas.ts` | Zod v4 校验 schema：API 请求体校验 |
@@ -99,14 +100,23 @@ HappyClaw 是一个自托管的多用户 AI Agent 系统：
 
 ### 2.3 容器 / 宿主机执行
 
-Agent Runner（`container/agent-runner/`）在 Docker 容器或宿主机进程中执行：
+happyclaw 支持双 Agent backend，host 端按 [`src/runtime-resolver.ts`](src/runtime-resolver.ts) 的 `resolveGroupRuntime(group, user)`（per-group → per-user → DEFAULT_RUNTIME）选 runner spawn：
+
+| Backend | Runner | 描述 |
+|---------|--------|------|
+| `claude` | [`container/agent-runner/`](container/agent-runner) | Claude Agent SDK + claude CLI，是当前主路径，支持 SubAgent / PreCompact hooks / Skills |
+| `cursor` | [`container/cursor-runner/`](container/cursor-runner) | cursor-agent CLI 子进程，stream-json 输出翻译成 happyclaw `StreamEvent`；MCP 配置走 `<workspace>/.cursor/mcp.json`；多轮 `--resume <chat_id>` |
+
+两个 runner 共享同一份 stdin/stdout/IPC 协议（host 不感知 backend），共享同一个 happyclaw-mcp-server stdio 子进程提供的 17 个工具。
+
+Agent Runner（`container/agent-runner/`，Claude 路径）在 Docker 容器或宿主机进程中执行：
 
 - **输入协议**：stdin 接收初始 JSON（`ContainerInput`：prompt、sessionId、groupFolder、chatJid、isHome、isAdminHome），IPC 文件接收后续消息
 - **输出协议**：stdout 输出 `OUTPUT_START_MARKER...OUTPUT_END_MARKER` 包裹的 JSON（`ContainerOutput`：status、result、newSessionId、streamEvent）
 - **流式事件**：`text_delta`、`thinking_delta`、`tool_use_start/end`、`tool_progress`、`hook_started/progress/response`、`task_start`、`task_notification`、`status`、`init` —— 通过 WebSocket `stream_event` 消息广播到 Web 端
 - **文本缓冲**：`text_delta` 累积到 200 字符后刷新，避免高频小包
 - **会话循环**：`query()` → 等待 IPC 消息 → 再次 `query()` → 直到 `_close` sentinel
-- **MCP Server**：12 个工具（`send_message`、`schedule_task`、`list/pause/resume/cancel_task`、`register_group`、`install_skill`、`uninstall_skill`、`memory_append`、`memory_search`、`memory_get`），通过 SDK `createSdkMcpServer()` 以同进程模式注册
+- **MCP Server**：17 个工具（`send_message`、`send_image`、`send_file`、`schedule_task`、`list/pause/resume/cancel_task`、`register_group`、`discord_get_history/channel_info/server_info`、`install_skill`、`uninstall_skill`、`memory_append`、`memory_search`、`memory_get`），默认由独立 stdio MCP server `container/happyclaw-mcp-server/` 提供（agent-runner 通过 `mcpServers.happyclaw = { command: 'node', args: [...] }` 拉起子进程），同时被未来的 cursor-runner 复用。设 `HAPPYCLAW_USE_LEGACY_MCP=1` 可切回旧的 `createSdkMcpServer()` 同进程注册路径作为紧急回滚（保留一个 release 周期）
 - **Hooks**：PreCompact 钩子在上下文压缩前归档对话到 `conversations/` 目录
 - **敏感数据过滤**：StreamEvent 中的 `toolInputSummary` 会过滤 `ANTHROPIC_API_KEY` 等环境变量名
 - **预定义 SubAgent**：`agent-definitions.ts` 定义 `code-reviewer`（代码审查）和 `web-researcher`（网页研究）两个 SubAgent，通过 SDK `agents` 选项注册到 query() 会话中
@@ -119,25 +129,73 @@ Agent Runner（`container/agent-runner/`）在 Docker 容器或宿主机进程�
 | `types.ts` | 共享类型定义（ContainerInput、ContainerOutput 等），re-export StreamEvent |
 | `utils.ts` | 纯工具函数（字符串截断、敏感数据脱敏、文件名清理等） |
 | `stream-processor.ts` | StreamEventProcessor 类：流式事件缓冲、工具状态追踪、SubAgent 消息转换 |
-| `mcp-tools.ts` | MCP 工具定义：12 个工具通过 SDK `tool()` 注册，IPC 文件通信 |
+| `mcp-tools.ts` | **Legacy** MCP 工具定义：17 个工具通过 SDK `tool()` 同进程注册，IPC 文件通信。仅在 `HAPPYCLAW_USE_LEGACY_MCP=1` 时被使用，权威实现已迁移到 `container/happyclaw-mcp-server/` |
 | `agent-definitions.ts` | 预定义 SubAgent（code-reviewer、web-researcher） |
 | `image-detector.ts` | 图片 MIME 检测（由 `shared/image-detector.ts` 构建时同步生成，勿直接编辑） |
 | `stream-event.types.ts` | StreamEvent 类型（由 `shared/stream-event.ts` 构建时同步生成，勿直接编辑） |
 
+**HappyClaw MCP Server 模块结构**（`container/happyclaw-mcp-server/src/`）：独立 stdio MCP server，被 agent-runner 和 cursor-runner 共享拉起。
+
+| 文件 | 职责 |
+|------|------|
+| `index.ts` | stdio server 入口：解析启动参数 → 注册 `ListTools` / `CallTool` handlers → `StdioServerTransport` |
+| `tools.ts` | 17 个 `ToolDef` 工具定义（与 legacy `mcp-tools.ts` 语义完全一致），含纯函数 `buildSendMessageData`（被单元测试导入）|
+| `context.ts` | 静态 ctx 从 CLI flags 解析，动态 ctx（`chatJid` / `currentTaskId` / `isScheduledTask`）从 `<workspaceIpc>/current-context.json` 读取；agent-runner 和 cursor-runner 在每次 IPC turn 开始前 atomic write 该文件 |
+| `image-detector.ts` | 图片 MIME 检测（由 `shared/image-detector.ts` 构建时同步生成，勿直接编辑） |
+
+**Cursor Runner 模块结构**（`container/cursor-runner/src/`）：通过 `cursor-agent` CLI 子进程驱动 Cursor backend，复刻 agent-runner 的 stdin/stdout/IPC 协议供 host 无感知切换。
+
+| 文件 | 职责 |
+|------|------|
+| `index.ts` | 主入口：读取 ContainerInput → 写 `<workspace>/.cursor/mcp.json` 和 `<workspace>/AGENTS.md` → 主循环 spawn cursor-agent → 解析 stream-json → emit OUTPUT_MARKER 包裹的 ContainerOutput；维护 auto-compact state + attachment staging |
+| `stream-translator.ts` | `CursorStreamTranslator`：cursor stream-json → happyclaw `StreamEvent` 翻译（`system/init` → `init`、`assistant` 含 `timestamp_ms` 的 chunk → `text_delta`、`tool_call.started/completed` → `tool_use_start/end`、`result.success` → final + `usage` event） |
+| `mcp-config.ts` | 写 `<workspace>/.cursor/mcp.json`（cursor-agent 不接受 inline `--mcp-config`，必须写文件）：项目级 MCP 配置加载 happyclaw-mcp-server 的 8 个 CLI flags |
+| `build-agents-md.ts` | `buildAgentsMd(ctx)` 拼接 + `writeAgentsMd(workspace, content)` 原子写：从 `HAPPYCLAW_PROMPTS_DIR`（host 端指向 `container/agent-runner/prompts/`）读 11 个 md，按 isHome / channel / agentId / disableMemoryLayer 选段渲染 `<workspace>/AGENTS.md`，cursor-agent `--workspace=` 启动时自动加载，等价于 agent-runner 的 `systemPrompt.append`。每个 turn 重新渲染（chatJid / agentId 可能变） |
+| `auto-compact.ts` | Token-based PreCompact 等价物：`AutoCompactState` 累计 `result.usage.{input,output}Tokens`，超过 `CURSOR_AUTO_COMPACT_TOKENS` 阈值后 `buildArchiveMarkdown` + `writeArchive` 到 `<workspace>/conversations/<ts>-cursor-<chatId>.md`，下一轮不传 `--resume`（强制开新 chat），emit `status` event 通知 host。阈值默认 `0`（禁用），建议生产值 200_000–800_000 |
+| `attachments.ts` | 图片附件路由：`writeImageAttachments` 把 IPC base64 图片写到 `<workspace>/.cr-attachments/<turnId>/img-N.<ext>`（按 magic bytes 探测 MIME 选扩展名），`appendAttachmentReferences` 在 prompt 末尾追加文件引用 footer 让 cursor-agent 用内置 vision tool 读取。每 turn 一个独立子目录，不自动清理（便于 debug） |
+| `ipc.ts` | `IpcChannel`：drain `input/*.json`、监听 `_close` / `_drain` / `_interrupt` sentinels（与 agent-runner 一致）、`waitForNext` 用 fs.watch + 5s 兜底轮询 |
+| `types.ts` | `ContainerInput` / `ContainerOutput`（与 agent-runner 一致）+ Cursor stream-json 子集类型（`CursorSystemInit` / `CursorAssistantDelta` / `CursorToolCallEvent` / `CursorResult`） |
+| `channel-prefixes.ts` / `image-detector.ts` / `stream-event.types.ts` | 由 `shared/` 构建时同步生成（`make sync-types`），勿直接编辑 |
+
+**Prompts 共享机制**：`container/agent-runner/prompts/` 是唯一真相源（11 个 .md，含 `channels/` 子目录）。两个 runner 不复制 prompts：
+- agent-runner 直接 `loadPrompt('xxx.md')` 注入到 SDK `systemPrompt.append`（XML 标签包裹）
+- cursor-runner 启动 + 每 turn 调 `buildAgentsMd()` 拼成 markdown，写到 `<workspace>/AGENTS.md`，cursor-agent 自动加载
+- host 通过 `HAPPYCLAW_PROMPTS_DIR` 环境变量告诉 cursor-runner 找 prompts（宿主机模式 = `container/agent-runner/prompts/`，容器模式 = `/tmp/prompts` 由 entrypoint.sh symlink）
+- 改 prompts 时只编辑 `container/agent-runner/prompts/`，无需重启服务即生效（cursor-runner 每 turn re-read，agent-runner 进程级缓存需重启子进程）
+
+cursor-runner 与 agent-runner 的差异：
+- **PreCompact hook / 记忆刷新**：Cursor 不暴露 compact 事件，cursor-runner 用 token 阈值实现等价物（`auto-compact.ts`）。设 `CURSOR_AUTO_COMPACT_TOKENS=200000` 启用：累计 token 越过阈值时把对话归档到 `<workspace>/conversations/`，下一轮强制开新 chat。语义 ≠ Claude SDK 的"摘要后继续"，更像"主动 reset session + 完整归档"
+- **流式注入用户消息**（不可实现）：cursor-agent CLI 一次只接受一个 prompt，follow-up 在 IPC 排队，下一轮 `--resume <chat_id>` 合并
+- **图片附件**：通过 `attachments.ts` 把 IPC base64 写到 `<workspace>/.cr-attachments/<turnId>/img-N.<ext>`，prompt 末尾追加文件引用让 cursor-agent 内置 vision tool 读取。注意 cursor-agent 当前 model 必须是多模态（如 `claude-4.6-sonnet-medium`），单模态模型会忽略附件
+- **`thinking_delta` 事件**（不可实现）：cursor-agent stream-json 不暴露 thinking 内容（即便用 thinking 模型）
+
 ### 2.4 执行模式
 
-每个注册群组可选择执行模式（`RegisteredGroup.executionMode`）：
+每个注册群组组合两个独立维度：**runtime（agent backend）** × **execution mode（沙箱）**。
 
-| 模式 | 行为 | 适用对象 | 前置依赖 |
-|------|------|---------|---------|
-| `host` | Agent 作为宿主机进程运行，通过 `claude` CLI 直接访问宿主机文件系统 | admin 主容器（`folder=main`） | Claude Agent SDK（自动安装） |
-| `container` | Agent 在 Docker 容器中运行，通过卷挂载访问文件，完全隔离 | member 主容器（`folder=home-{userId}`）及其他群组 | Docker Desktop + 构建镜像 |
+**Runtime 维度**（`RegisteredGroup.runtime` per-group override，缺省时从 `User.default_runtime` 解析）：
+
+| Runtime | Runner | Spawn 命令 | 前置依赖 |
+|---------|--------|-----------|---------|
+| `claude`（默认） | `container/agent-runner/` | `node .../agent-runner/dist/index.js` | `@anthropic-ai/claude-agent-sdk`（npm install 自动装） |
+| `cursor` | `container/cursor-runner/` | `node .../cursor-runner/dist/index.js` 内部再 spawn `cursor-agent --print` | `cursor-agent` CLI 在 PATH（容器：`Dockerfile` 自动安装；宿主机：`curl https://cursor.com/install -fsS \| bash`） |
+
+容器模式下 runtime 通过 env file 中的 `HAPPYCLAW_RUNTIME` 透传给 entrypoint.sh，由它选择 spawn `/tmp/dist/index.js`（claude）或 `/tmp/cursor-runner-dist/index.js`（cursor）。宿主机模式下 [`container-runner.ts`](src/container-runner.ts) 的 `getRunnerSetup(runtime)` 直接选 dist 路径。决策由 [`src/runtime-resolver.ts`](src/runtime-resolver.ts) 的 `resolveGroupRuntime(group, owner)` 完成。
+
+**Execution Mode 维度**（`RegisteredGroup.executionMode`）：
+
+| 模式 | 行为 | 适用对象 |
+|------|------|---------|
+| `host` | Agent 作为宿主机进程运行，直接访问宿主机文件系统 | admin 主容器（`folder=main`） |
+| `container` | Agent 在 Docker 容器中运行，通过卷挂载访问文件，完全隔离 | member 主容器（`folder=home-{userId}`）及其他群组 |
 
 **is_home 模型**：每个用户在注册时自动创建一个 `is_home=true` 的主容器。`loadState()` 启动时强制执行模式：admin 的主容器（`folder=main`）设为 `host`，member 的主容器（`folder=home-{userId}`）设为 `container`。
 
-宿主机模式通过 `node container/agent-runner/dist/index.js` 启动 agent-runner 进程，agent-runner 内部调用 `@anthropic-ai/claude-agent-sdk`，SDK 内置了完整的 Claude Code CLI 运行时（`cli.js`），无需全局安装。
+**Runtime + Execution mode 组合矩阵**：四种组合都支持。例如 admin 的 `main` 群组可以是 `host` × `claude`（默认）或 `host` × `cursor`（设 `User.default_runtime='cursor'` 即可），member 的家容器可以是 `container` × `claude` 或 `container` × `cursor`。
 
-宿主机模式支持 `customCwd` 自定义工作目录，使用 `MAX_CONCURRENT_HOST_PROCESSES`（默认 5）作为独立的并发限制。
+宿主机模式通过 `node container/{agent-runner,cursor-runner}/dist/index.js` 启动 runner 进程；agent-runner 内部调用 `@anthropic-ai/claude-agent-sdk`，cursor-runner 内部 spawn `cursor-agent` CLI 子进程。两条路径都通过相同的 happyclaw-mcp-server stdio 子进程提供 17 个工具。
+
+宿主机模式支持 `customCwd` 自定义工作目录，使用 `MAX_CONCURRENT_HOST_PROCESSES`（默认 5）作为独立的并发限制（与 runtime 无关）。
 
 ### 2.5 Docker 容器构建
 
@@ -146,7 +204,8 @@ Agent Runner（`container/agent-runner/`）在 Docker 容器或宿主机进程�
 - 安装 Chromium + 系统依赖（用于 `agent-browser` 浏览器自动化）
 - 全局安装 `agent-browser` 和 `@anthropic-ai/claude-code`（始终最新版本）
 - 局部安装 `@anthropic-ai/claude-agent-sdk`（`"*"` 版本 + 无 lock file = 每次构建安装最新）
-- entrypoint.sh：加载环境变量 → 发现 Skills（符号链接）→ 编译 TypeScript → 从 stdin 读取 → 执行
+- 通过 `curl https://cursor.com/install -fsS | bash` 安装 `cursor-agent` CLI 到 `/usr/local/bin/`（Cursor backend 必需）
+- entrypoint.sh：加载环境变量 → 发现 Skills（符号链接）→ 编译 TypeScript（agent-runner + happyclaw-mcp-server，必要时 cursor-runner）→ 从 stdin 读取 → 根据 `$HAPPYCLAW_RUNTIME` spawn 对应 dist
 - 以 `node` 非 root 用户运行
 - 构建命令：`./container/build.sh`（`CACHEBUST` 参数确保跳过缓存）
 
@@ -320,7 +379,7 @@ StreamEvent 类型以 `shared/stream-event.ts` 为单一真相源，构建时通
 
 ## 5. 数据库表
 
-SQLite WAL 模式，Schema 经历 v1→v24 演进（`db.ts` 中的 `SCHEMA_VERSION`）。
+SQLite WAL 模式，Schema 经历 v1→v38 演进（`db.ts` 中的 `SCHEMA_VERSION`）。
 
 | 表 | 主键 | 用途 |
 |-----|------|------|
@@ -328,10 +387,10 @@ SQLite WAL 模式，Schema 经历 v1→v24 演进（`db.ts` 中的 `SCHEMA_VERSI
 | `messages` | `(id, chat_jid)` | 消息历史（含 `is_from_me`、`source` 标识来源、`attachments`） |
 | `scheduled_tasks` | `id` | 定时任务（调度类型、上下文模式、状态、`execution_type`、`script_command`、`created_by`） |
 | `task_run_logs` | `id` (auto) | 任务执行日志（耗时、状态、结果） |
-| `registered_groups` | `jid` | 注册的会话（folder 映射、容器配置、执行模式、`customCwd`、`is_home`、`init_source_path`、`init_git_url`、`selected_skills`、`require_mention`） |
-| `sessions` | `(group_folder, agent_id)` | 会话 ID 映射（Claude session 持久化，支持 Sub-Agent 独立会话；`provider_id` 字段用于 ProviderPool sticky 选择，避免跨 OAuth 账号 thinking block 签名失效） |
+| `registered_groups` | `jid` | 注册的会话（folder 映射、容器配置、执行模式、`customCwd`、`is_home`、`init_source_path`、`init_git_url`、`selected_skills`、`require_mention`、`runtime` per-group backend override，NULL 跟随 user 默认） |
+| `sessions` | `(group_folder, agent_id)` | 会话 ID 映射（Claude session 持久化，支持 Sub-Agent 独立会话；`provider_id` 字段用于 ProviderPool sticky 选择，避免跨 OAuth 账号 thinking block 签名失效；`cursor_chat_id` 字段持有同一 group 在 Cursor backend 下的会话 ID，与 `session_id` 并存以支持 backend 切换不丢历史） |
 | `router_state` | `key` | KV 存储（`last_timestamp`、`last_agent_timestamp`） |
-| `users` | `id` | 用户账户（密码哈希、角色、权限、状态、`ai_name`、`ai_avatar_emoji`、`ai_avatar_color`、`avatar_emoji`、`avatar_color`、`ai_avatar_url`、`deleted_at`） |
+| `users` | `id` | 用户账户（密码哈希、角色、权限、状态、`ai_name`、`ai_avatar_emoji`、`ai_avatar_color`、`avatar_emoji`、`avatar_color`、`ai_avatar_url`、`default_runtime` per-user 默认 backend，`'claude'`/`'cursor'`，`deleted_at`） |
 | `user_sessions` | `id` | 登录会话（token、过期时间、最后活跃） |
 | `invite_codes` | `code` | 注册邀请码（最大使用次数、过期时间） |
 | `auth_audit_log` | `id` (auto) | 认证审计日志 |
@@ -485,7 +544,45 @@ WebSocket：`/ws`（协议详见 §3.6）。
 
 前端 `MessageBubble` 组件根据消息来源的群组 owner 显示对应的 AI 外观。
 
-### 8.10 IM 通道热管理
+### 8.10 Runtime 切换（双 backend 选择）
+
+用户可在 `SettingsPage` → 个人偏好 → "默认 AI Backend" 选择 `claude` 或 `cursor`：
+- `PUT /api/auth/profile` 接受 `default_runtime: 'claude' | 'cursor'`
+- 影响后续创建的工作区 + 没有 per-group override 的现有工作区
+
+每个工作区可在 `ChatView` 顶部 backend badge 上点击切换（pin 到具体 backend）：
+- `PATCH /api/groups/:jid` 接受 `runtime: 'claude' | 'cursor' | null`（null = 清除 override，回到用户默认）
+- 切换不影响历史消息可见性，但下次发送会启动新会话（`claude_session_id` 与 `cursor_chat_id` 各管各的）
+- 数据库 `sessions` 表 v38 同时持有两个 ID，切回原 backend 可恢复对应会话上下文
+
+切换决策由 [`src/runtime-resolver.ts`](src/runtime-resolver.ts) 的 `resolveGroupRuntime(group, owner)` 完成（per-group → per-user → DEFAULT_RUNTIME）。
+
+### 8.11 Cursor 模型选择
+
+当 runtime 解析为 `cursor` 时，`cursor-agent --model <id>` 的取值由 [`src/cursor-model-resolver.ts`](src/cursor-model-resolver.ts) 的 `resolveCursorModel(group, owner)` 决定：
+
+1. 群组级覆盖：`registered_groups.cursor_model`
+2. 用户默认：`users.cursor_model`
+3. 部署环境变量：`CURSOR_MODEL`
+4. 代码内置默认：`HARDCODED_DEFAULT_CURSOR_MODEL = 'claude-opus-4-7-thinking-max'`
+
+**入口**：
+
+| 入口 | 接口 | 用途 |
+|------|------|------|
+| Web 设置页 | `PUT /api/auth/profile` 带 `cursor_model` | 用户级默认（`null` = 清除） |
+| Web 聊天页 | `PATCH /api/groups/:jid` 带 `cursor_model` | 群组级覆盖（`null` = 清除） |
+| IM 命令 | `/model` / `/model <id>` / `/model reset` / `/model list` | 飞书/Telegram/QQ/钉钉 切换当前群组的 cursor_model |
+| 模型列表 | `GET /api/config/cursor-models[?force=1]` | 动态拉取（`cursor-agent --list-models --trust < /dev/null`），后端 5 分钟内存缓存 + 前端 5 分钟 SWR |
+
+**关键约束**：
+- 模型列表通过 `cursor-agent --list-models` 动态获取，**与 cursor-agent 账号订阅绑定**——不同账号能看到的模型列表不同
+- 后端 [`src/cursor-models-list.ts`](src/cursor-models-list.ts) 在 5 分钟内复用结果；订阅变更后用户可点"刷新列表"或调用 `?force=1`
+- `cursor-agent --list-models` 必须用 `< /dev/null` 关闭 stdin 且**禁止用 `head -N` 截断管道**（会触发 cursor-agent EPIPE 死锁）
+- DB schema v39 在 `users` 和 `registered_groups` 各加 `cursor_model TEXT`（NULL = 继承）；存储层不校验值，验证只在 API 层做（regex `[a-z0-9._-]{1,128}`）
+- 切换模型不影响历史消息；下次发消息会以新模型起新 cursor chat（`sessions.cursor_chat_id` 重新写入）
+
+### 8.12 IM 通道热管理
 
 通过 `PUT /api/config/user-im/feishu`、`PUT /api/config/user-im/telegram`、`PUT /api/config/user-im/qq` 或 `PUT /api/config/user-im/dingtalk` 更新 IM 配置后：
 - 保存配置到 `data/config/user-im/{userId}/` 目录（AES-256-GCM 加密）
@@ -493,7 +590,7 @@ WebSocket：`/ws`（协议详见 §3.6）。
 - 如果新配置有效（`enabled=true` 且凭据非空），立即建立新连接
 - `ignoreMessagesBefore` 设为当前时间戳，避免处理堆积消息
 
-### 8.11 IM 斜杠命令
+### 8.13 IM 斜杠命令
 
 飞书/Telegram/QQ/钉钉 中以 `/` 开头的消息会被拦截为斜杠命令（未知命令继续作为普通消息处理）。命令在主服务进程的 `handleCommand()` 中分发，纯函数逻辑在 `im-command-utils.ts` 中（便于单测）。
 
@@ -504,10 +601,11 @@ WebSocket：`/ws`（协议详见 §3.6）。
 | `/recall` | `/rc` | 调用 Claude CLI（`--print` 模式）总结最近 10 条消息，API 不可用时 fallback 到原始消息列表 |
 | `/clear` | - | 清除当前对话的会话上下文 |
 | `/require_mention` | - | 切换群聊响应模式：`/require_mention true`（需要 @机器人）或 `/require_mention false`（全量响应） |
+| `/model` | `/models` | 查看 / 切换当前群组的 Cursor 模型（仅 cursor backend 有效）；`/model <id>` 切换；`/model reset` 清除覆盖；`/model list` 列出所有可用模型 |
 
 `/recall` 通过 `execFile('claude', ['--print'])` + stdin 管道调用 Claude CLI，复用与 Agent Runner 相同的 OAuth 认证机制。
 
-### 8.12 群聊 Mention 控制
+### 8.14 群聊 Mention 控制
 
 飞书群聊支持 per-group 的 @mention 控制，类似 OpenClaw 的 `resolveGroupActivationFor()` 机制：
 
@@ -557,6 +655,14 @@ WebSocket：`/ws`（协议详见 §3.6）。
   - 通过 `make update-sdk` 手动触发一次更新
 - 容器内以 `node` 非 root 用户运行，需注意文件权限
 - **关闭服务时禁止 `lsof -ti:PORT | xargs kill`**，该命令会杀掉所有连接到该端口的进程（包括 OrbStack/Docker 网络代理），导致 Docker daemon 崩溃。正确做法：`lsof -ti:PORT -sTCP:LISTEN | xargs kill`（仅杀监听进程）
+- **Cursor backend 部署要求**（runtime=cursor 时）：
+  - 宿主机模式：`cursor-agent` 必须在 PATH 中。装法：`curl https://cursor.com/install -fsS | bash`，然后 `cursor-agent login` 完成 OAuth。或者设 `CURSOR_API_KEY` 环境变量走 headless 鉴权。`runHostAgent()` 启动前会 `cursor-agent --version` 做 preflight，缺少时返回结构化错误
+  - 容器模式：`Dockerfile` 已经 `curl install` 装到 `/usr/local/bin/cursor-agent`。容器内不能 OAuth 登录，必须通过 happyclaw 服务进程的 `CURSOR_API_KEY` 环境变量透传到容器
+  - per-user 凭据隔离暂未实现（Step 6 才会暴露 UI 配置），目前所有 cursor 路径共享 happyclaw 主进程的 `CURSOR_API_KEY`
+  - 可选环境变量：
+    - `CURSOR_MODEL`（默认 `claude-4.6-sonnet-medium`）：覆盖 cursor-agent 调用的模型
+    - `CURSOR_AGENT_BIN`（默认 `cursor-agent`）：cursor-agent 二进制路径
+    - `CURSOR_AUTO_COMPACT_TOKENS`（默认 `0` 禁用）：跨 turn 累计 input+output tokens 超过此值时自动归档对话到 `<workspace>/conversations/` + 下轮强制开新 chat。建议生产值 200000–800000 视模型上下文窗口
 
 ### 10.1 Issue / PR 规范
 
@@ -717,9 +823,10 @@ make help          # 列出所有可用的 make 命令
 
 ### 新增 MCP 工具
 
-1. 在 `container/agent-runner/src/mcp-tools.ts` 的 `createMcpTools()` 中添加 `tool()` 定义
-2. 主进程 `src/index.ts` 的 IPC 处理器增加对应 type 分支
-3. 重建容器镜像：`./container/build.sh`
+1. 在 `container/happyclaw-mcp-server/src/tools.ts` 中定义新的 `ToolDef`（name / description / zod inputSchema / handler），并在 `getActiveTools()` 中根据 ctx 注册条件追加
+2. 如果新工具需要主进程能力（IPC 请求-响应），在 `src/index.ts` 的 IPC 处理器增加对应 type 分支；纯文件操作类工具（如 `memory_append`）则无需主进程介入
+3. 同步把 legacy `container/agent-runner/src/mcp-tools.ts` 也加上对应工具定义（保持 legacy fallback 路径完整一个 release 周期）
+4. 重建容器镜像：`./container/build.sh`（容器启动时 `entrypoint.sh` 会自动 tsc 重新编译挂载的 src）
 
 ### 新增 Skills
 

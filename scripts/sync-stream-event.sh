@@ -16,30 +16,34 @@ sync_file() {
   fi
 }
 
-# --- StreamEvent types (3 targets) ---
+# --- StreamEvent types (4 targets: backend + agent-runner + cursor-runner + web) ---
 SRC_SE="$ROOT/shared/stream-event.ts"
 for target in \
   "$ROOT/container/agent-runner/src/stream-event.types.ts" \
+  "$ROOT/container/cursor-runner/src/stream-event.types.ts" \
   "$ROOT/src/stream-event.types.ts" \
   "$ROOT/web/src/stream-event.types.ts" \
 ; do
   sync_file "$SRC_SE" "$target"
 done
 
-# --- Image detector (2 targets: backend + agent-runner; not needed by web) ---
+# --- Image detector (4 targets: backend + agent-runner + cursor-runner + happyclaw-mcp-server; not needed by web) ---
 SRC_ID="$ROOT/shared/image-detector.ts"
 for target in \
   "$ROOT/src/image-detector.ts" \
   "$ROOT/container/agent-runner/src/image-detector.ts" \
+  "$ROOT/container/cursor-runner/src/image-detector.ts" \
+  "$ROOT/container/happyclaw-mcp-server/src/image-detector.ts" \
 ; do
   sync_file "$SRC_ID" "$target"
 done
 
-# --- Channel prefixes (2 targets: backend + agent-runner; not needed by web) ---
+# --- Channel prefixes (3 targets: backend + agent-runner + cursor-runner; not needed by web) ---
 SRC_CP="$ROOT/shared/channel-prefixes.ts"
 for target in \
   "$ROOT/src/channel-prefixes.ts" \
   "$ROOT/container/agent-runner/src/channel-prefixes.ts" \
+  "$ROOT/container/cursor-runner/src/channel-prefixes.ts" \
 ; do
   sync_file "$SRC_CP" "$target"
 done

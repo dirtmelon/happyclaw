@@ -92,6 +92,10 @@ import type { AuthUser, RegisteredGroup } from '../types.js';
 import { hasPermission } from '../permissions.js';
 import { logger } from '../logger.js';
 import {
+  listCursorModels,
+  getCursorModelsCacheState,
+} from '../cursor-models-list.js';
+import {
   checkImChannelLimit,
   isBillingEnabled,
   clearBillingEnabledCache,
@@ -1235,6 +1239,76 @@ configRoutes.get('/appearance/public', (c) => {
   } catch (err) {
     logger.error({ err }, 'Failed to load public appearance config');
     return c.json({ error: 'Failed to load appearance config' }, 500);
+  }
+});
+
+// ─── Cursor models discovery ───────────────────────────────────────
+//
+// Returns the dynamic list of cursor-agent models available to the current
+// account. Used by:
+//   - Web ProfileSection ("默认 Cursor 模型" dropdown)
+//   - Web ChatView per-group model selector
+//   - IM `/model` slash command
+//
+// Hits `cursor-agent --list-models` under the hood (see cursor-models-list.ts)
+// with a 5-min in-process cache. Authenticated users only — model names by
+// themselves don't leak secrets, but the cursor-agent process inherits this
+// happyclaw service's credentials and we don't want to expose subscription
+// tier info to anonymous callers.
+//
+// `?force=1` bypasses the 5-min cache and triggers a fresh subprocess. That
+// path is admin-gated (manage_system_config) because each force=1 call costs
+// up to 12s of subprocess wall-time; making it member-callable would let any
+// logged-in user serially DoS the dropdown UX for everyone.
+configRoutes.get('/cursor-models', authMiddleware, async (c) => {
+  const force = c.req.query('force') === '1';
+  if (force) {
+    const user = c.get('user') as AuthUser;
+    if (!hasPermission(user, 'manage_system_config')) {
+      return c.json(
+        { error: 'force refresh requires manage_system_config' },
+        403,
+      );
+    }
+  }
+  // Time the entire request (cache lookup + possible subprocess) so we can
+  // diagnose "dropdown is slow" reports later. cache=true means we served
+  // from the in-memory hit; force=true bypasses cache. durationMs near
+  // CACHE_TTL_MS (5min) is normal for the first request after expiry, but
+  // recurring durations > 1s on cache=true is a bug.
+  const startedAt = Date.now();
+  try {
+    const models = await listCursorModels({ force });
+    const cache = getCursorModelsCacheState();
+    logger.debug(
+      {
+        force,
+        cached: cache.cached,
+        cacheAgeMs: cache.ageMs,
+        durationMs: Date.now() - startedAt,
+        count: models.length,
+      },
+      'GET /api/config/cursor-models',
+    );
+    return c.json({
+      models,
+      cache: {
+        cached: cache.cached,
+        ageMs: cache.ageMs,
+        fetchedAt: cache.fetchedAt,
+      },
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const code = (err as NodeJS.ErrnoException)?.code;
+    // ENOENT = cursor-agent missing → 503 with install hint so the UI can
+    // disable the dropdown and surface an actionable error.
+    const status = code === 'ENOENT' ? 503 : 500;
+    logger.warn(
+      { err: message, code, force, durationMs: Date.now() - startedAt },
+      'GET /api/config/cursor-models failed',
+    );
+    return c.json({ error: message, code: code ?? null }, status);
   }
 });
 

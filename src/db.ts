@@ -44,6 +44,8 @@ import {
   UserSessionWithUser,
   Permission,
   PermissionTemplateKey,
+  Runtime,
+  DEFAULT_RUNTIME,
 } from './types.js';
 import { getDefaultPermissions, normalizePermissions } from './permissions.js';
 
@@ -296,6 +298,7 @@ export function initDatabase(): void {
       group_folder TEXT NOT NULL,
       session_id TEXT NOT NULL,
       agent_id TEXT NOT NULL DEFAULT '',
+      cursor_chat_id TEXT,
       PRIMARY KEY (group_folder, agent_id)
     );
     CREATE TABLE IF NOT EXISTS registered_groups (
@@ -305,7 +308,9 @@ export function initDatabase(): void {
       added_at TEXT NOT NULL,
       container_config TEXT,
       created_by TEXT,
-      is_home INTEGER DEFAULT 0
+      is_home INTEGER DEFAULT 0,
+      runtime TEXT,
+      cursor_model TEXT
     );
     CREATE TABLE IF NOT EXISTS im_context_bindings (
       source_jid TEXT NOT NULL,
@@ -343,6 +348,8 @@ export function initDatabase(): void {
       ai_avatar_emoji TEXT,
       ai_avatar_color TEXT,
       ai_avatar_url TEXT,
+      default_runtime TEXT NOT NULL DEFAULT 'claude',
+      cursor_model TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       last_login_at TEXT,
@@ -1248,7 +1255,29 @@ export function initDatabase(): void {
     db.exec('ALTER TABLE sessions ADD COLUMN provider_id TEXT');
   }
 
-  const SCHEMA_VERSION = '37';
+  // v37 → v38: Dual-runtime architecture (Claude path via agent-runner,
+  // Cursor path via cursor-runner — see Step 1 plan).
+  //   - users.default_runtime    : per-user default backend ('claude' / 'cursor')
+  //   - registered_groups.runtime: per-group override (NULL = follow user default)
+  //   - sessions.cursor_chat_id  : Cursor chat ID, parallel to existing
+  //                                session_id which keeps Claude SDK semantics
+  // CHECK constraints are intentionally omitted (SQLite ALTER TABLE limitation);
+  // validation lives in the application layer (Zod schemas + resolveGroupRuntime).
+  ensureColumn('users', 'default_runtime', "TEXT NOT NULL DEFAULT 'claude'");
+  ensureColumn('registered_groups', 'runtime', 'TEXT');
+  ensureColumn('sessions', 'cursor_chat_id', 'TEXT');
+
+  // v38 → v39: Per-user / per-group Cursor model selection.
+  //   - users.cursor_model            : per-user default (NULL = inherit env / hardcoded)
+  //   - registered_groups.cursor_model: per-group override (NULL = follow user)
+  // Resolution chain (see resolveCursorModel): group → user → env → hardcoded.
+  // Allowed-list validation happens at the route layer against the dynamic
+  // list returned by GET /api/config/cursor-models, so we don't need a CHECK
+  // constraint here.
+  ensureColumn('users', 'cursor_model', 'TEXT');
+  ensureColumn('registered_groups', 'cursor_model', 'TEXT');
+
+  const SCHEMA_VERSION = '39';
   db.prepare(
     'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
   ).run('schema_version', SCHEMA_VERSION);
@@ -2267,6 +2296,48 @@ export function setSessionProviderId(
   ).run(groupFolder, effectiveAgentId, providerId);
 }
 
+/**
+ * Get the cursor_chat_id bound to a session (group_folder + agent_id).
+ * Returns undefined when no row or no Cursor chat has been started yet.
+ *
+ * Cursor's `--resume <chatId>` is the analog of Claude's `resume: sessionId`.
+ * The two IDs live side-by-side on the same `sessions` row because Step 6 will
+ * let users switch backends per-group; switching opens a fresh chat on the new
+ * runtime while preserving the old runtime's chat ID for potential later switch
+ * back.
+ */
+export function getSessionCursorChatId(
+  groupFolder: string,
+  agentId?: string | null,
+): string | undefined {
+  const effectiveAgentId = agentId || '';
+  const row = db
+    .prepare(
+      'SELECT cursor_chat_id FROM sessions WHERE group_folder = ? AND agent_id = ?',
+    )
+    .get(groupFolder, effectiveAgentId) as
+    | { cursor_chat_id: string | null }
+    | undefined;
+  return row?.cursor_chat_id ?? undefined;
+}
+
+/**
+ * Bind a session to a specific cursor_chat_id, or clear it (cursor_chat_id=null).
+ * Upserts a sessions row if one does not yet exist (with empty session_id).
+ */
+export function setSessionCursorChatId(
+  groupFolder: string,
+  agentId: string | null | undefined,
+  cursorChatId: string | null,
+): void {
+  const effectiveAgentId = agentId || '';
+  db.prepare(
+    `INSERT INTO sessions (group_folder, session_id, agent_id, cursor_chat_id)
+     VALUES (?, '', ?, ?)
+     ON CONFLICT(group_folder, agent_id) DO UPDATE SET cursor_chat_id = excluded.cursor_chat_id`,
+  ).run(groupFolder, effectiveAgentId, cursorChatId);
+}
+
 export function deleteAllSessionsForFolder(groupFolder: string): void {
   db.prepare('DELETE FROM sessions WHERE group_folder = ?').run(groupFolder);
 }
@@ -2363,6 +2434,8 @@ type RegisteredGroupRow = {
   feishu_chat_mode: string | null;
   feishu_group_message_type: string | null;
   sender_allowlist: string | null;
+  runtime: string | null;
+  cursor_model: string | null;
 };
 
 /** Convert a raw DB row into a RegisteredGroup domain object. */
@@ -2402,6 +2475,20 @@ function parseGroupRow(
     sender_allowlist: row.sender_allowlist != null
       ? (JSON.parse(row.sender_allowlist) as string[])
       : undefined,
+    // null in DB → undefined in domain model = "follow user default";
+    // unknown legacy values fall back to undefined for forward-compat.
+    runtime:
+      row.runtime === 'claude' || row.runtime === 'cursor'
+        ? (row.runtime as Runtime)
+        : undefined,
+    // null/empty → undefined ("inherit"); any other string is preserved as-is
+    // so a Cursor-renamed model survives a happyclaw restart even when the
+    // dynamic list-models cache hasn't refreshed yet. Validation against
+    // available models lives at the route layer.
+    cursor_model:
+      typeof row.cursor_model === 'string' && row.cursor_model.length > 0
+        ? row.cursor_model
+        : undefined,
   };
 }
 
@@ -2433,8 +2520,8 @@ export function getRegisteredGroup(
 
 export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
   db.prepare(
-    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, execution_mode, custom_cwd, init_source_path, init_git_url, created_by, is_home, selected_skills, target_agent_id, target_main_jid, reply_policy, require_mention, activation_mode, owner_im_id, mcp_mode, selected_mcps, conversation_source, conversation_nav_mode, binding_mode, feishu_chat_mode, feishu_group_message_type, sender_allowlist)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, execution_mode, custom_cwd, init_source_path, init_git_url, created_by, is_home, selected_skills, target_agent_id, target_main_jid, reply_policy, require_mention, activation_mode, owner_im_id, mcp_mode, selected_mcps, conversation_source, conversation_nav_mode, binding_mode, feishu_chat_mode, feishu_group_message_type, sender_allowlist, runtime, cursor_model)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     jid,
     group.name,
@@ -2462,6 +2549,8 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
     group.feishu_chat_mode ?? null,
     group.feishu_group_message_type ?? null,
     group.sender_allowlist != null ? JSON.stringify(group.sender_allowlist) : null,
+    group.runtime ?? null,
+    group.cursor_model ?? null,
   );
 }
 
@@ -3096,6 +3185,18 @@ function parseUserStatus(value: unknown): UserStatus {
   return 'active';
 }
 
+/**
+ * Coerce a DB-stored runtime value to a valid Runtime.
+ * Accepts the canonical literals; falls back to DEFAULT_RUNTIME for any other
+ * value (legacy NULL, unknown string, etc.). The schema enforces NOT NULL on
+ * users.default_runtime, but legacy rows migrated before v38 may carry NULL
+ * briefly during the ALTER TABLE; this guard keeps reads safe in that window.
+ */
+function parseRuntime(value: unknown): Runtime {
+  if (value === 'claude' || value === 'cursor') return value;
+  return DEFAULT_RUNTIME;
+}
+
 function parsePermissionsFromDb(raw: unknown, role: UserRole): Permission[] {
   if (typeof raw === 'string') {
     try {
@@ -3148,6 +3249,11 @@ function mapUserRow(row: Record<string, unknown>): User {
       typeof row.ai_avatar_color === 'string' ? row.ai_avatar_color : null,
     ai_avatar_url:
       typeof row.ai_avatar_url === 'string' ? row.ai_avatar_url : null,
+    default_runtime: parseRuntime(row.default_runtime),
+    cursor_model:
+      typeof row.cursor_model === 'string' && row.cursor_model.length > 0
+        ? row.cursor_model
+        : null,
     created_at: String(row.created_at),
     updated_at: String(row.updated_at),
     last_login_at:
@@ -3174,6 +3280,8 @@ function toUserPublic(user: User, lastActiveAt: string | null): UserPublic {
     ai_avatar_emoji: user.ai_avatar_emoji,
     ai_avatar_color: user.ai_avatar_color,
     ai_avatar_url: user.ai_avatar_url,
+    default_runtime: user.default_runtime,
+    cursor_model: user.cursor_model,
     created_at: user.created_at,
     last_login_at: user.last_login_at,
     last_active_at: lastActiveAt,
@@ -3461,6 +3569,8 @@ export function updateUserFields(
       | 'ai_avatar_emoji'
       | 'ai_avatar_color'
       | 'ai_avatar_url'
+      | 'default_runtime'
+      | 'cursor_model'
       | 'deleted_at'
     >
   >,
@@ -3535,6 +3645,23 @@ export function updateUserFields(
   if (updates.ai_avatar_url !== undefined) {
     fields.push('ai_avatar_url = ?');
     values.push(updates.ai_avatar_url);
+  }
+  if (updates.default_runtime !== undefined) {
+    // RuntimeSchema validation has already run by the time the route layer
+    // calls us; we still guard against a stray value because the column has
+    // NOT NULL CHECK semantics enforced only at the application layer.
+    fields.push('default_runtime = ?');
+    values.push(updates.default_runtime);
+  }
+  if (updates.cursor_model !== undefined) {
+    // null = clear back to inheritance (env CURSOR_MODEL → hard-coded default).
+    // Allowed-list validation against the dynamic /api/config/cursor-models
+    // happens at the route layer; the DB layer accepts any string so a stale
+    // model ID survives a Cursor subscription change without a write failure.
+    fields.push('cursor_model = ?');
+    values.push(
+      updates.cursor_model === null ? null : String(updates.cursor_model),
+    );
   }
   if (updates.deleted_at !== undefined) {
     fields.push('deleted_at = ?');

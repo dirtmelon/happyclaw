@@ -19,6 +19,14 @@ export interface GroupInfo {
   activation_mode?: 'auto' | 'always' | 'when_mentioned' | 'owner_mentioned' | 'disabled';
   conversation_source?: 'manual' | 'feishu_thread';
   conversation_nav_mode?: 'horizontal' | 'vertical_threads';
+  /** Per-group agent backend override. `null` / undefined = follow user
+   * `default_runtime`. Surfaced from PATCH /api/groups/:jid for the runtime
+   * indicator + switch UI in ChatView. */
+  runtime?: 'claude' | 'cursor' | null;
+  /** Per-group Cursor model override. `null` / undefined = follow user
+   * `cursor_model` → env `CURSOR_MODEL` → hard default. Only surfaced in the
+   * UI when the resolved runtime is `cursor`. */
+  cursor_model?: string | null;
 }
 
 export interface AgentInfo {

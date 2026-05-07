@@ -5,6 +5,30 @@ import { ALL_PERMISSIONS } from './permissions.js';
 import type { Permission } from './types.js';
 import { MAX_GROUP_NAME_LEN } from './web-context.js';
 
+/**
+ * Agent backend selector. Used by Step 6 UI (per-user default + per-group
+ * override) and any API that accepts a runtime hint. Mirrors the `Runtime`
+ * type in `types.ts`; keeping it as a Zod enum here lets routes validate
+ * incoming values without re-stating the literals.
+ */
+export const RuntimeSchema = z.enum(['claude', 'cursor']);
+
+/**
+ * Validation for a Cursor model identifier (e.g. `claude-opus-4-7-thinking-max`,
+ * `gpt-5.3-codex-fast`). Cursor's actual model IDs use only `[a-z0-9._-]`; we
+ * apply that lexical class plus a length cap to reject obviously malformed
+ * payloads. Allowed-list validation against the dynamic Cursor account list
+ * happens at the route layer (against the `/api/config/cursor-models` cache),
+ * so a perfectly-formed but inactive ID still gets rejected with a clear error
+ * — but this schema permits any well-formed string so the operator can choose
+ * a stale ID temporarily without the whole patch failing.
+ */
+export const CursorModelSchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[a-z0-9._-]+$/i, 'Invalid Cursor model id');
+
 export const TaskPatchSchema = z.object({
   chat_jid: z.string().min(1).optional(),
   prompt: z.string().optional(),
@@ -196,6 +220,22 @@ export const GroupPatchSchema = z.object({
     .enum(['auto', 'always', 'when_mentioned', 'owner_mentioned', 'disabled'])
     .optional(),
   execution_mode: z.enum(['container', 'host']).optional(),
+  /**
+   * Per-group agent backend override:
+   *   - `'claude'` / `'cursor'`: pin this group to the specified runtime
+   *     regardless of the owner's default
+   *   - `null`: clear the override; the group falls back to
+   *     `User.default_runtime` (resolved on every spawn)
+   *   - `undefined` (omitted): no change
+   */
+  runtime: RuntimeSchema.nullable().optional(),
+  /**
+   * Per-group Cursor model override:
+   *   - non-empty string: pin this group's Cursor model
+   *   - `null`: clear the override; falls back to user / env / hard default
+   *   - `undefined` (omitted): no change
+   */
+  cursor_model: CursorModelSchema.nullable().optional(),
 });
 
 export const LoginSchema = z.object({
@@ -287,6 +327,17 @@ export const ProfileUpdateSchema = z.object({
     .refine((v) => v.startsWith('/api/auth/avatars/'), 'Invalid avatar URL')
     .nullable()
     .optional(),
+  /**
+   * Per-user default agent backend. Falls back to `'claude'` when omitted.
+   * Per-group `RegisteredGroup.runtime` overrides this on a case-by-case
+   * basis (see `src/runtime-resolver.ts`).
+   */
+  default_runtime: RuntimeSchema.optional(),
+  /**
+   * Per-user default Cursor model. `null` clears the user-level preference,
+   * falling back to env `CURSOR_MODEL` then the hard-coded default.
+   */
+  cursor_model: CursorModelSchema.nullable().optional(),
 });
 
 export const PermissionValueSchema = z

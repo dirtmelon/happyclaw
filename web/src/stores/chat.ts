@@ -206,6 +206,8 @@ interface ChatState {
   agentWaiting: Record<string, boolean>;             // agentId → waiting for reply
   agentHasMore: Record<string, boolean>;             // agentId → has more messages
   loadGroups: () => Promise<void>;
+  setGroupRuntime: (jid: string, runtime: 'claude' | 'cursor' | null) => Promise<void>;
+  setGroupCursorModel: (jid: string, cursorModel: string | null) => Promise<void>;
   selectGroup: (jid: string) => void;
   loadMessages: (jid: string, loadMore?: boolean) => Promise<void>;
   refreshMessages: (jid: string) => Promise<void>;
@@ -1314,6 +1316,46 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set({ error: err instanceof Error ? err.message : String(err) });
       return null;
     }
+  },
+
+  setGroupRuntime: async (jid: string, runtime: 'claude' | 'cursor' | null) => {
+    // Server accepts `runtime: null` to clear a per-group override (fall back
+    // to user.default_runtime); 'claude' / 'cursor' to pin. Caller is the
+    // ChatView indicator; toast / refresh handled there.
+    await api.patch<{ success: boolean }>(
+      `/api/groups/${encodeURIComponent(jid)}`,
+      { runtime },
+    );
+    set((s) => {
+      const group = s.groups[jid];
+      if (!group) return s;
+      return {
+        groups: {
+          ...s.groups,
+          [jid]: { ...group, runtime },
+        },
+      };
+    });
+  },
+
+  setGroupCursorModel: async (jid: string, cursorModel: string | null) => {
+    // PATCH accepts `cursor_model: null` to clear the per-group override and
+    // any non-empty CursorModelSchema-validated string to pin. Mirrors
+    // setGroupRuntime's optimistic-update pattern.
+    await api.patch<{ success: boolean }>(
+      `/api/groups/${encodeURIComponent(jid)}`,
+      { cursor_model: cursorModel },
+    );
+    set((s) => {
+      const group = s.groups[jid];
+      if (!group) return s;
+      return {
+        groups: {
+          ...s.groups,
+          [jid]: { ...group, cursor_model: cursorModel },
+        },
+      };
+    });
   },
 
   renameFlow: async (jid: string, name: string) => {

@@ -8,6 +8,11 @@ import {
   ContainerEnvSchema,
 } from '../schemas.js';
 import type { AuthUser, RegisteredGroup, ExecutionMode } from '../types.js';
+import {
+  type GroupPatch,
+  mergeGroupPatch,
+  patchHasChanges,
+} from '../group-patch-merge.js';
 import { checkGroupLimit } from '../billing.js';
 import { DATA_DIR, GROUPS_DIR, isDockerAvailable } from '../config.js';
 import {
@@ -159,6 +164,13 @@ interface GroupPayloadItem {
   activation_mode?: 'auto' | 'always' | 'when_mentioned' | 'owner_mentioned' | 'disabled';
   conversation_source?: 'manual' | 'feishu_thread';
   conversation_nav_mode?: 'horizontal' | 'vertical_threads';
+  /** Per-group agent backend override; null = follow user.default_runtime. */
+  runtime?: 'claude' | 'cursor' | null;
+  /** Per-group Cursor model override; null = follow user.cursor_model
+   * → env CURSOR_MODEL → hard default. Only meaningful when the resolved
+   * runtime is 'cursor'; surfaced regardless so the UI can render an
+   * indicator after a runtime flip without an extra round-trip. */
+  cursor_model?: string | null;
 }
 
 function buildGroupsPayload(user: AuthUser): Record<string, GroupPayloadItem> {
@@ -269,6 +281,8 @@ function buildGroupsPayload(user: AuthUser): Record<string, GroupPayloadItem> {
       activation_mode: group.activation_mode ?? 'auto',
       conversation_source: group.conversation_source ?? 'manual',
       conversation_nav_mode: group.conversation_nav_mode ?? 'horizontal',
+      runtime: group.runtime ?? null,
+      cursor_model: group.cursor_model ?? null,
     };
   }
 
@@ -671,6 +685,8 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     is_pinned,
     activation_mode,
     execution_mode,
+    runtime,
+    cursor_model,
   } = validation.data;
   const name = rawName ? normalizeGroupName(rawName) : undefined;
 
@@ -679,7 +695,9 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     !name &&
     is_pinned === undefined &&
     activation_mode === undefined &&
-    execution_mode === undefined
+    execution_mode === undefined &&
+    runtime === undefined &&
+    cursor_model === undefined
   ) {
     return c.json({ error: 'No fields to update' }, 400);
   }
@@ -705,7 +723,9 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     is_pinned !== undefined &&
     !name &&
     activation_mode === undefined &&
-    execution_mode === undefined;
+    execution_mode === undefined &&
+    runtime === undefined &&
+    cursor_model === undefined;
   if (isPinOnly) {
     if (
       !canAccessGroup(
@@ -747,32 +767,21 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     unpinGroup(authUser.id, jid);
   }
 
-  // Update registered group if name, activation_mode, or execution_mode changed
-  if (name || activation_mode !== undefined || execution_mode !== undefined) {
-    const updated: RegisteredGroup = {
-      name: name || existing.name,
-      folder: existing.folder,
-      added_at: existing.added_at,
-      containerConfig: existing.containerConfig,
-      executionMode:
-        execution_mode !== undefined
-          ? (execution_mode as ExecutionMode)
-          : existing.executionMode,
-      customCwd: existing.customCwd,
-      initSourcePath: existing.initSourcePath,
-      initGitUrl: existing.initGitUrl,
-      created_by: existing.created_by,
-      is_home: existing.is_home,
-      target_agent_id: existing.target_agent_id,
-      target_main_jid: existing.target_main_jid,
-      reply_policy: existing.reply_policy,
-      require_mention: existing.require_mention,
-      activation_mode:
-        activation_mode !== undefined
-          ? activation_mode
-          : existing.activation_mode,
-    };
-
+  // Update registered group when any persisted field changed. The merge +
+  // change-detection logic lives in `src/group-patch-merge.ts` so unit tests
+  // can pin the contract without bootstrapping Hono. Adding a new persisted
+  // field requires updating both `GroupPatch` (type) and `patchHasChanges`
+  // (gate); the test suite enforces this lockstep so a future field doesn't
+  // silently slip through (which is what caused P0-1 for cursor_model).
+  const patch: GroupPatch = {
+    name,
+    activation_mode,
+    execution_mode: execution_mode as ExecutionMode | undefined,
+    runtime,
+    cursor_model,
+  };
+  if (patchHasChanges(patch)) {
+    const updated = mergeGroupPatch(existing, patch);
     setRegisteredGroup(jid, updated);
     if (name) updateChatName(jid, name);
     deps.getRegisteredGroups()[jid] = updated;

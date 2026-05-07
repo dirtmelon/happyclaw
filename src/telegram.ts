@@ -34,7 +34,11 @@ export interface TelegramConnectOpts {
     code: string,
   ) => Promise<boolean>;
   /** 斜杠指令回调（如 /clear），返回回复文本或 null */
-  onCommand?: (chatJid: string, command: string) => Promise<string | null>;
+  onCommand?: (
+    chatJid: string,
+    command: string,
+    senderImId?: string,
+  ) => Promise<string | null>;
   /** 热重连时设置：丢弃 date 早于此时间戳（epoch ms）的消息，避免处理渠道关闭期间的堆积消息 */
   ignoreMessagesBefore?: number;
   /** 根据 jid 解析群组 folder，用于下载文件/图片到工作区 */
@@ -511,7 +515,12 @@ export function createTelegramConnection(
               'Telegram slash command detected',
             );
             try {
-              const reply = await opts.onCommand(jid, cmdBody);
+              // Plumb the Telegram user id (raw, no `tg:` prefix) so handlers
+              // like `/model` can compare to `group.owner_im_id`. On Telegram,
+              // owner_im_id is set via `/owner_mention` (the `/allow` backfill
+              // path is Feishu-only).
+              const senderImId = ctx.from?.id?.toString();
+              const reply = await opts.onCommand(jid, cmdBody, senderImId);
               if (reply) {
                 await ctx.reply(reply);
                 return; // 已知命令，拦截

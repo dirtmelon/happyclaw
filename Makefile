@@ -1,8 +1,8 @@
 .PHONY: dev dev-backend dev-web build build-backend build-web start \
-       typecheck typecheck-backend typecheck-web typecheck-agent-runner \
+       typecheck typecheck-backend typecheck-web typecheck-agent-runner typecheck-mcp-server typecheck-cursor-runner \
        format format-check install install-host-tools clean reset-init update-sdk ensure-latest-sdk sync-types \
        backup restore help _ensure-docker-image logs status stop \
-       _check-sync _build-web-if-stale _build-ar-if-stale _build-backend-if-stale \
+       _check-sync _build-web-if-stale _build-ar-if-stale _build-mcp-if-stale _build-cr-if-stale _build-backend-if-stale \
        _start-pm2 _start-direct
 
 # ─── Runtime Detection ──────────────────────────────────────
@@ -33,9 +33,11 @@ PM2_GUARD = PM2_WAS_RUNNING=0; \
 	trap "if [ \"$$PM2_WAS_RUNNING\" = '1' ]; then echo '▶  恢复 pm2 happyclaw...'; pm2 start happyclaw; fi" EXIT INT TERM
 
 dev: ## 启动前后端（首次自动安装依赖和构建容器镜像）；自动暂停 pm2，退出后恢复
-	@if [ ! -d node_modules ] || [ package.json -nt node_modules ] || [ web/package.json -nt web/node_modules ] || [ container/agent-runner/package.json -nt container/agent-runner/node_modules ]; then echo "📦 依赖有更新，安装依赖..."; $(MAKE) install; fi
+	@if [ ! -d node_modules ] || [ package.json -nt node_modules ] || [ web/package.json -nt web/node_modules ] || [ container/agent-runner/package.json -nt container/agent-runner/node_modules ] || [ container/happyclaw-mcp-server/package.json -nt container/happyclaw-mcp-server/node_modules ] || [ container/cursor-runner/package.json -nt container/cursor-runner/node_modules ]; then echo "📦 依赖有更新，安装依赖..."; $(MAKE) install; fi
 	@$(MAKE) _ensure-docker-image
 	@$(PKG) --prefix container/agent-runner run build --silent 2>/dev/null || $(PKG) --prefix container/agent-runner run build
+	@$(PKG) --prefix container/happyclaw-mcp-server run build --silent 2>/dev/null || $(PKG) --prefix container/happyclaw-mcp-server run build
+	@$(PKG) --prefix container/cursor-runner run build --silent 2>/dev/null || $(PKG) --prefix container/cursor-runner run build
 	@$(PM2_GUARD); \
 	echo "🚀 使用 $(PKG) 启动..."; \
 	$(PKG) run dev:all
@@ -70,7 +72,7 @@ start: ensure-latest-sdk ## 一键启动生产环境（pm2 托管时自动走 pm
 
 _start-pm2: ## (内部) pm2 托管模式：build 后 pm2 restart
 	@echo "🔄 检测到 pm2 托管 happyclaw，改走 pm2 restart"
-	@$(MAKE) _check-sync _build-web-if-stale _build-ar-if-stale _build-backend-if-stale
+	@$(MAKE) _check-sync _build-web-if-stale _build-ar-if-stale _build-mcp-if-stale _build-cr-if-stale _build-backend-if-stale
 	@pm2 restart happyclaw --update-env
 	@sleep 2
 	@pm2 logs happyclaw --lines 20 --nostream || true
@@ -83,18 +85,22 @@ _start-direct: ## (内部) 裸跑模式（无 pm2 或未注册）
 	  lsof -ti:$(PORT) -sTCP:LISTEN | xargs ps -fp 2>/dev/null | tail -1; \
 	  exit 1; \
 	fi
-	@if [ ! -d node_modules ] || [ package.json -nt node_modules ] || [ web/package.json -nt web/node_modules ] || [ container/agent-runner/package.json -nt container/agent-runner/node_modules ]; then echo "📦 依赖有更新，安装依赖..."; $(MAKE) install; fi
+	@if [ ! -d node_modules ] || [ package.json -nt node_modules ] || [ web/package.json -nt web/node_modules ] || [ container/agent-runner/package.json -nt container/agent-runner/node_modules ] || [ container/happyclaw-mcp-server/package.json -nt container/happyclaw-mcp-server/node_modules ] || [ container/cursor-runner/package.json -nt container/cursor-runner/node_modules ]; then echo "📦 依赖有更新，安装依赖..."; $(MAKE) install; fi
 	@$(MAKE) _ensure-docker-image
 	@$(MAKE) _check-sync
 ifeq ($(HAS_BUN),1)
 	@$(MAKE) _build-web-if-stale
 	@$(MAKE) _build-ar-if-stale
+	@$(MAKE) _build-mcp-if-stale
+	@$(MAKE) _build-cr-if-stale
 	@echo "⚡ Bun 模式：直接运行 TypeScript，跳过后端编译"
 	bun src/index.ts
 else
 	@$(MAKE) _build-backend-if-stale
 	@$(MAKE) _build-web-if-stale
 	@$(MAKE) _build-ar-if-stale
+	@$(MAKE) _build-mcp-if-stale
+	@$(MAKE) _build-cr-if-stale
 	node dist/index.js
 endif
 
@@ -102,7 +108,7 @@ endif
 
 _check-sync: ## (内部) 检测 shared/ 类型变更并同步
 	@NEED_SYNC=0; \
-	for target in src/stream-event.types.ts web/src/stream-event.types.ts container/agent-runner/src/stream-event.types.ts src/image-detector.ts container/agent-runner/src/image-detector.ts src/channel-prefixes.ts container/agent-runner/src/channel-prefixes.ts; do \
+	for target in src/stream-event.types.ts web/src/stream-event.types.ts container/agent-runner/src/stream-event.types.ts container/cursor-runner/src/stream-event.types.ts src/image-detector.ts container/agent-runner/src/image-detector.ts container/cursor-runner/src/image-detector.ts container/happyclaw-mcp-server/src/image-detector.ts src/channel-prefixes.ts container/agent-runner/src/channel-prefixes.ts container/cursor-runner/src/channel-prefixes.ts; do \
 	  if [ ! -f "$$target" ] || [ -n "$$(find shared/ -newer "$$target" -name '*.ts' 2>/dev/null | head -1)" ]; then NEED_SYNC=1; break; fi; \
 	done; \
 	if [ "$$NEED_SYNC" = "1" ]; then echo "🔄 检测到 shared/ 类型变更，同步类型..."; $(MAKE) sync-types; fi
@@ -128,6 +134,28 @@ _build-ar-if-stale: ## (内部) agent-runner 变更时重新编译
 	  if [ "$$NEED_AR" = "0" ] && [ -n "$$(find container/agent-runner/src/ -newer container/agent-runner/dist/.tsbuildinfo -name '*.ts' 2>/dev/null | head -1)" ]; then NEED_AR=1; fi; \
 	fi; \
 	if [ "$$NEED_AR" = "1" ]; then echo "🔨 检测到 agent-runner 变更，重新编译..."; cd container/agent-runner && $(PKG) run build; else echo "✅ agent-runner 无变更，跳过编译"; fi
+
+_build-mcp-if-stale: ## (内部) happyclaw-mcp-server 变更时重新编译
+	@NEED_MCP=0; \
+	if [ ! -f container/happyclaw-mcp-server/dist/.tsbuildinfo ]; then NEED_MCP=1; \
+	else \
+	  for f in container/happyclaw-mcp-server/package.json container/happyclaw-mcp-server/tsconfig.json; do \
+	    if [ -f "$$f" ] && [ "$$f" -nt container/happyclaw-mcp-server/dist/.tsbuildinfo ]; then NEED_MCP=1; break; fi; \
+	  done; \
+	  if [ "$$NEED_MCP" = "0" ] && [ -n "$$(find container/happyclaw-mcp-server/src/ -newer container/happyclaw-mcp-server/dist/.tsbuildinfo -name '*.ts' 2>/dev/null | head -1)" ]; then NEED_MCP=1; fi; \
+	fi; \
+	if [ "$$NEED_MCP" = "1" ]; then echo "🔨 检测到 happyclaw-mcp-server 变更，重新编译..."; cd container/happyclaw-mcp-server && $(PKG) run build; else echo "✅ happyclaw-mcp-server 无变更，跳过编译"; fi
+
+_build-cr-if-stale: ## (内部) cursor-runner 变更时重新编译
+	@NEED_CR=0; \
+	if [ ! -f container/cursor-runner/dist/.tsbuildinfo ]; then NEED_CR=1; \
+	else \
+	  for f in container/cursor-runner/package.json container/cursor-runner/tsconfig.json; do \
+	    if [ -f "$$f" ] && [ "$$f" -nt container/cursor-runner/dist/.tsbuildinfo ]; then NEED_CR=1; break; fi; \
+	  done; \
+	  if [ "$$NEED_CR" = "0" ] && [ -n "$$(find container/cursor-runner/src/ -newer container/cursor-runner/dist/.tsbuildinfo -name '*.ts' 2>/dev/null | head -1)" ]; then NEED_CR=1; fi; \
+	fi; \
+	if [ "$$NEED_CR" = "1" ]; then echo "🔨 检测到 cursor-runner 变更，重新编译..."; cd container/cursor-runner && $(PKG) run build; else echo "✅ cursor-runner 无变更，跳过编译"; fi
 
 _build-backend-if-stale: ## (内部) 后端变更时重新编译（Node 模式）
 	@NEED_BACKEND=0; \
@@ -177,7 +205,7 @@ status: ## 查看服务运行状态
 
 # ─── Quality ─────────────────────────────────────────────────
 
-typecheck: sync-types typecheck-backend typecheck-web typecheck-agent-runner ## 全量类型检查
+typecheck: sync-types typecheck-backend typecheck-web typecheck-agent-runner typecheck-mcp-server typecheck-cursor-runner ## 全量类型检查
 	@./scripts/check-stream-event-sync.sh
 
 typecheck-backend:
@@ -188,6 +216,12 @@ typecheck-web:
 
 typecheck-agent-runner:
 	cd container/agent-runner && $(RUN) tsc --noEmit
+
+typecheck-mcp-server:
+	cd container/happyclaw-mcp-server && $(RUN) tsc --noEmit
+
+typecheck-cursor-runner:
+	cd container/cursor-runner && $(RUN) tsc --noEmit
 
 test: ## 运行单元测试
 ifeq ($(HAS_BUN),1)
@@ -204,8 +238,8 @@ format-check: ## 检查代码格式
 
 # ─── Docker Image ─────────────────────────────────────────────
 
-# Docker 镜像源文件：Dockerfile、entrypoint.sh、agent-runner 源码和运行时 prompts
-DOCKER_SRC := container/Dockerfile container/entrypoint.sh $(wildcard container/agent-runner/src/*.ts) $(shell find container/agent-runner/prompts -type f 2>/dev/null)
+# Docker 镜像源文件：Dockerfile、entrypoint.sh、agent-runner / happyclaw-mcp-server / cursor-runner 源码和运行时 prompts
+DOCKER_SRC := container/Dockerfile container/entrypoint.sh $(wildcard container/agent-runner/src/*.ts) $(shell find container/agent-runner/prompts -type f 2>/dev/null) $(wildcard container/happyclaw-mcp-server/src/*.ts) container/happyclaw-mcp-server/package.json container/happyclaw-mcp-server/tsconfig.json $(wildcard container/cursor-runner/src/*.ts) container/cursor-runner/package.json container/cursor-runner/tsconfig.json
 
 _ensure-docker-image: ## (内部) 检测 Docker 镜像是否需要构建/重建
 	@if command -v docker >/dev/null 2>&1; then \
@@ -240,6 +274,9 @@ update-sdk: ## 更新 agent-runner 的 Claude Agent SDK 到最新版本
 	cd container/agent-runner && $(PKG) update @anthropic-ai/claude-agent-sdk && $(PKG) run build
 	@# npm/bun update 会将 "*" 回写为具体版本，还原它
 	@sed -i '' 's/"@anthropic-ai\/claude-agent-sdk": "[^"]*"/"@anthropic-ai\/claude-agent-sdk": "*"/' container/agent-runner/package.json
+	@# sed 改 mtime → 让 install 检测误以为依赖变了，下次 make start 触发全量 install。
+	@# touch node_modules 把 mtime 关系恢复到 install 后的状态。
+	@touch container/agent-runner/node_modules
 	@echo "SDK updated. Run 'make typecheck' to verify."
 
 ensure-latest-sdk: ## 启动前自动检测并更新 SDK（有新版才更新）
@@ -249,6 +286,7 @@ ensure-latest-sdk: ## 启动前自动检测并更新 SDK（有新版才更新）
 		echo "🔄 Claude Agent SDK 有新版本: $$LOCAL → $$LATEST，正在更新..."; \
 		(cd container/agent-runner && $(PKG) update @anthropic-ai/claude-agent-sdk && $(PKG) run build); \
 		sed -i '' 's/"@anthropic-ai\/claude-agent-sdk": "[^"]*"/"@anthropic-ai\/claude-agent-sdk": "*"/' container/agent-runner/package.json; \
+		touch container/agent-runner/node_modules; \
 		echo "✅ SDK 更新完成（内置 Claude Code 版本随之更新）"; \
 	else \
 		echo "✅ Claude Agent SDK 已是最新 ($$LOCAL)"; \
@@ -259,20 +297,34 @@ ensure-latest-sdk: ## 启动前自动检测并更新 SDK（有新版才更新）
 install-host-tools: ## 安装宿主机模式所需的外部工具（feishu-cli、agent-browser、uv）+ 刷新 builtin-skills 缓存
 	@./scripts/install-host-tools.sh
 
-install: ## 安装全部依赖并编译 agent-runner
+install: ## 安装全部依赖并编译 agent-runner + happyclaw-mcp-server + cursor-runner
 	$(PKG) install
 	@# node-pty 的 spawn-helper 预构建二进制可能缺少可执行权限，导致 PTY 模式失败
 	@chmod +x node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper 2>/dev/null || true
 	cd container/agent-runner && $(PKG) install
 	cd container/agent-runner && $(PKG) run build
-	cd web && $(PKG) install
+	cd container/happyclaw-mcp-server && $(PKG) install
+	cd container/happyclaw-mcp-server && $(PKG) run build
+	cd container/cursor-runner && $(PKG) install
+	cd container/cursor-runner && $(PKG) run build
+	@# web 单独宽容处理：npm 11.11 + Node 25 撞 @tailwindcss/oxide-darwin-x64 的
+	@# "Invalid Version" 已知 bug，让 web install 失败不会阻塞其他目录的 install
+	@# 完成 + 后续 touch 跑到（避免下次 make start 又重复触发同一 bug）。如果 web/
+	@# 真的需要装新依赖，下面的 warning 会提示用户单独修。
+	@(cd web && $(PKG) install) || \
+	  printf "\n\033[33m⚠️  web npm install 失败（疑似 npm 11.11 + Node 25 bug：@tailwindcss/oxide-darwin-x64 解析 Invalid Version）。\n\
+	  现有 web/node_modules/ 仍可用；继续 install 流程，touch 会刷新 mtime 避免循环触发。\n\
+	  彻底修法：降级 npm（npm install -g npm@10）或 Node 到 LTS（nvm install 22）。\033[0m\n"
 	@# 更新目录 mtime 以配合 start 中的依赖变更检测（[ package.json -nt node_modules ]）
-	@touch node_modules web/node_modules container/agent-runner/node_modules
+	@# 即便 web install 失败也 touch — 否则下次 make start 又会重新触发 install 走到 web 再次失败
+	@touch node_modules web/node_modules container/agent-runner/node_modules container/happyclaw-mcp-server/node_modules container/cursor-runner/node_modules
 
 clean: ## 清理构建产物
 	rm -rf dist
 	rm -rf web/dist
 	rm -rf container/agent-runner/dist
+	rm -rf container/happyclaw-mcp-server/dist
+	rm -rf container/cursor-runner/dist
 	rm -f .build-sentinel .docker-build-sentinel
 
 reset-init: ## 完全重置为首装状态（清空所有运行时数据）

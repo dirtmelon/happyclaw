@@ -1,9 +1,13 @@
 import { describe, expect, test } from 'vitest';
 
+// Imports the new standalone happyclaw-mcp-server tools module. The legacy
+// container/agent-runner/src/mcp-tools.ts is kept in tree as the
+// HAPPYCLAW_USE_LEGACY_MCP=1 fallback but is no longer the test surface —
+// the new module is the canonical implementation.
 import {
   buildSendMessageData,
   type McpContext,
-} from '../container/agent-runner/src/mcp-tools.js';
+} from '../container/happyclaw-mcp-server/src/tools.js';
 
 function baseCtx(overrides: Partial<McpContext> = {}): McpContext {
   return {

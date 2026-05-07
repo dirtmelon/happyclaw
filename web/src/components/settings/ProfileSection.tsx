@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
-import { Loader2, Upload, Trash2, User, Bot, Lock, Palette, Sun, Moon, Monitor, Bell, BellOff, CheckCircle2 } from 'lucide-react';
+import { Loader2, Upload, Trash2, User, Bot, Lock, Palette, Sun, Moon, Monitor, Bell, BellOff, CheckCircle2, Cpu } from 'lucide-react';
 import { toast } from 'sonner';
 
-import { useAuthStore } from '../../stores/auth';
+import { useAuthStore, type Runtime } from '../../stores/auth';
+import { useCursorModels } from '../../stores/cursor-models';
 import { useTheme, type Theme, type ColorScheme, type FontStyle } from '../../hooks/useTheme';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
@@ -106,7 +107,7 @@ function DesktopNotificationSection() {
 /* ── Main component ───────────────────────────────────────── */
 
 export function ProfileSection() {
-  const { user: currentUser, changePassword, updateProfile, uploadAvatar } = useAuthStore();
+  const { user: currentUser, changePassword, updateProfile, uploadAvatar, hasPermission } = useAuthStore();
   const { theme, setTheme, colorScheme, setColorScheme, fontStyle, setFontStyle } = useTheme();
 
   // Profile
@@ -133,6 +134,17 @@ export function ProfileSection() {
   const [newPwd, setNewPwd] = useState('');
   const [pwdChanging, setPwdChanging] = useState(false);
 
+  // Default AI backend (runtime)
+  const [defaultRuntime, setDefaultRuntime] = useState<Runtime>('claude');
+  const [runtimeSaving, setRuntimeSaving] = useState(false);
+
+  // Default Cursor model. `''` here means "inherit env / hard default" — when
+  // the user picks the placeholder option the API receives `null`, which
+  // clears the per-user override.
+  const [defaultCursorModel, setDefaultCursorModel] = useState<string>('');
+  const [cursorModelSaving, setCursorModelSaving] = useState(false);
+  const cursorModels = useCursorModels();
+
   useEffect(() => {
     setUsername(currentUser?.username || '');
     setDisplayName(currentUser?.display_name || '');
@@ -143,7 +155,9 @@ export function ProfileSection() {
     setAiAvatarEmoji(currentUser?.ai_avatar_emoji ?? null);
     setAiAvatarColor(currentUser?.ai_avatar_color ?? null);
     setAiAvatarUrl(currentUser?.ai_avatar_url ?? null);
-  }, [currentUser?.username, currentUser?.display_name, currentUser?.avatar_emoji, currentUser?.avatar_color, currentUser?.avatar_url, currentUser?.ai_name, currentUser?.ai_avatar_emoji, currentUser?.ai_avatar_color, currentUser?.ai_avatar_url]);
+    setDefaultRuntime(currentUser?.default_runtime || 'claude');
+    setDefaultCursorModel(currentUser?.cursor_model ?? '');
+  }, [currentUser?.username, currentUser?.display_name, currentUser?.avatar_emoji, currentUser?.avatar_color, currentUser?.avatar_url, currentUser?.ai_name, currentUser?.ai_avatar_emoji, currentUser?.ai_avatar_color, currentUser?.ai_avatar_url, currentUser?.default_runtime, currentUser?.cursor_model]);
 
   const handleUpdateProfile = async () => {
     setProfileSaving(true);
@@ -249,6 +263,37 @@ export function ProfileSection() {
       toast.success('头像已移除');
     } catch (err) {
       toast.error(getErrorMessage(err, '移除头像失败'));
+    }
+  };
+
+  const handleSaveDefaultRuntime = async () => {
+    setRuntimeSaving(true);
+    try {
+      await updateProfile({ default_runtime: defaultRuntime });
+      toast.success(`默认 AI Backend 已切换到 ${defaultRuntime === 'cursor' ? 'Cursor' : 'Claude'}`);
+    } catch (err) {
+      toast.error(getErrorMessage(err, '更新默认 AI Backend 失败'));
+    } finally {
+      setRuntimeSaving(false);
+    }
+  };
+
+  const handleSaveDefaultCursorModel = async () => {
+    setCursorModelSaving(true);
+    try {
+      // Empty value = clear per-user override (server will fall back to
+      // env CURSOR_MODEL → hard-coded default at spawn time).
+      const trimmed = defaultCursorModel.trim();
+      await updateProfile({ cursor_model: trimmed.length > 0 ? trimmed : null });
+      toast.success(
+        trimmed.length > 0
+          ? `默认 Cursor 模型已设为 ${trimmed}`
+          : '已清除默认 Cursor 模型 (使用部署默认)',
+      );
+    } catch (err) {
+      toast.error(getErrorMessage(err, '更新默认 Cursor 模型失败'));
+    } finally {
+      setCursorModelSaving(false);
     }
   };
 
@@ -419,7 +464,127 @@ export function ProfileSection() {
         </Button>
       </Section>
 
-      {/* ── 4. Password ── */}
+      {/* ── 4. Default AI Backend ── */}
+      <Section icon={Cpu} title="默认 AI Backend" desc="选择默认 Agent 引擎；每个工作区可在群组设置里单独覆盖">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+          <OptionButton
+            active={defaultRuntime === 'claude'}
+            onClick={() => setDefaultRuntime('claude')}
+            className="p-3"
+          >
+            <div className="flex flex-col items-start text-left gap-1">
+              <span className="font-medium">Claude</span>
+              <span className="text-[11px] text-muted-foreground leading-snug">
+                Anthropic Claude Agent SDK，原生支持 SubAgent / Skills / PreCompact hooks
+              </span>
+            </div>
+          </OptionButton>
+          <OptionButton
+            active={defaultRuntime === 'cursor'}
+            onClick={() => setDefaultRuntime('cursor')}
+            className="p-3"
+          >
+            <div className="flex flex-col items-start text-left gap-1">
+              <span className="font-medium">Cursor</span>
+              <span className="text-[11px] text-muted-foreground leading-snug">
+                通过 cursor-agent CLI 驱动；具体模型见下方"默认 Cursor 模型"
+              </span>
+            </div>
+          </OptionButton>
+        </div>
+        <p className="text-[11px] text-muted-foreground">
+          切换后下次发送消息会启动新会话；历史消息保留可见，新回复不带旧上下文。
+        </p>
+        <Button
+          onClick={handleSaveDefaultRuntime}
+          disabled={runtimeSaving || defaultRuntime === (currentUser?.default_runtime ?? 'claude')}
+          size="sm"
+        >
+          {runtimeSaving && <Loader2 className="size-4 animate-spin" />}
+          保存
+        </Button>
+      </Section>
+
+      {/* ── 4b. Default Cursor Model ── */}
+      <Section
+        icon={Cpu}
+        title="默认 Cursor 模型"
+        desc="cursor-agent --model 的默认值；每个工作区可在聊天页右上角单独覆盖。仅在 AI Backend = Cursor 时生效"
+      >
+        {cursorModels.error && (
+          <div className="text-xs text-destructive bg-destructive/10 border border-destructive/30 rounded px-3 py-2">
+            <p className="font-medium">无法获取 Cursor 模型列表</p>
+            <p className="opacity-80 mt-0.5">{cursorModels.error}</p>
+            <button
+              type="button"
+              onClick={() => void cursorModels.refresh()}
+              className="mt-1 underline hover:opacity-80"
+            >
+              重试
+            </button>
+          </div>
+        )}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-start">
+          <div>
+            <Label className="text-xs text-muted-foreground mb-1">模型 ID</Label>
+            <select
+              value={defaultCursorModel}
+              onChange={(e) => setDefaultCursorModel(e.target.value)}
+              disabled={cursorModels.loading && cursorModels.models.length === 0}
+              className="w-full h-9 px-2 rounded-md border border-input bg-background text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+            >
+              <option value="">
+                {cursorModels.loading && cursorModels.models.length === 0
+                  ? '加载中…'
+                  : '使用部署默认 (CURSOR_MODEL 环境变量 → claude-opus-4-7-thinking-max)'}
+              </option>
+              {cursorModels.models.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.label} — {m.id}
+                  {m.isDefault ? '  · cursor 默认' : ''}
+                  {m.isCurrent ? '  · 账号当前' : ''}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="flex items-center gap-2 mt-5">
+            <Button
+              onClick={handleSaveDefaultCursorModel}
+              disabled={
+                cursorModelSaving ||
+                defaultCursorModel.trim() === (currentUser?.cursor_model ?? '')
+              }
+              size="sm"
+            >
+              {cursorModelSaving && <Loader2 className="size-4 animate-spin" />}
+              保存
+            </Button>
+            {/* Force-refresh hits cursor-agent --list-models which can take
+                ~12s; the API is admin-gated (manage_system_config) so we
+                hide / disable the button for non-admins. Non-admins can
+                still SEE the list — it's the cached read that's open. */}
+            {hasPermission('manage_system_config') && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => void cursorModels.refresh()}
+                disabled={cursorModels.loading}
+                title="重新拉取 cursor-agent --list-models（绕过 5 分钟缓存，仅管理员）"
+              >
+                {cursorModels.loading && <Loader2 className="size-4 animate-spin" />}
+                刷新列表
+              </Button>
+            )}
+          </div>
+        </div>
+        <p className="text-[11px] text-muted-foreground leading-relaxed">
+          模型列表通过 <code>cursor-agent --list-models</code> 动态获取，与你 cursor 账号订阅绑定。
+          5 分钟内存缓存；订阅变化后点"刷新列表"。
+        </p>
+      </Section>
+
+      {/* ── 5. Password ── */}
       <Section icon={Lock} title="修改密码">
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>
