@@ -347,6 +347,7 @@ export const ProfileUpdateSchema = z.object({
    * falling back to env `CURSOR_MODEL` then the hard-coded default.
    */
   cursor_model: CursorModelSchema.nullable().optional(),
+  default_require_mention: z.boolean().optional(),
 });
 
 export const PermissionValueSchema = z

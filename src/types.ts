@@ -250,6 +250,14 @@ export interface User {
    * default. See `resolveCursorModel()` for the full chain.
    */
   cursor_model: string | null;
+  /**
+   * Per-user default for require_mention on auto-registered IM group chats.
+   * When true, newly auto-registered Feishu/Telegram/etc groups start with
+   * require_mention=1 (only @bot triggers a response). false preserves the
+   * legacy default of responding to every owner-sent message in the group.
+   * Existing groups are not retroactively changed.
+   */
+  default_require_mention: boolean;
   created_at: string;
   updated_at: string;
   last_login_at: string | null;
@@ -278,6 +286,7 @@ export interface UserPublic {
   default_runtime: Runtime;
   /** Per-user default Cursor model. `null` = inherit env / hard-coded default. */
   cursor_model: string | null;
+  default_require_mention: boolean;
   created_at: string;
   last_login_at: string | null;
   last_active_at: string | null;

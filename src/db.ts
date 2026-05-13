@@ -350,6 +350,7 @@ export function initDatabase(): void {
       ai_avatar_url TEXT,
       default_runtime TEXT NOT NULL DEFAULT 'claude',
       cursor_model TEXT,
+      default_require_mention INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       last_login_at TEXT,
@@ -663,6 +664,11 @@ export function initDatabase(): void {
   ensureColumn('users', 'ai_avatar_emoji', 'TEXT');
   ensureColumn('users', 'ai_avatar_color', 'TEXT');
   ensureColumn('users', 'ai_avatar_url', 'TEXT');
+  ensureColumn(
+    'users',
+    'default_require_mention',
+    'INTEGER NOT NULL DEFAULT 0',
+  );
   ensureColumn('scheduled_tasks', 'created_by', 'TEXT');
   ensureColumn('scheduled_tasks', 'execution_type', "TEXT DEFAULT 'agent'");
   ensureColumn('scheduled_tasks', 'script_command', 'TEXT');
@@ -830,6 +836,7 @@ export function initDatabase(): void {
     'ai_avatar_emoji',
     'ai_avatar_color',
     'ai_avatar_url',
+    'default_require_mention',
     'created_at',
     'updated_at',
     'last_login_at',
@@ -1277,7 +1284,12 @@ export function initDatabase(): void {
   ensureColumn('users', 'cursor_model', 'TEXT');
   ensureColumn('registered_groups', 'cursor_model', 'TEXT');
 
-  const SCHEMA_VERSION = '39';
+  // v39 → v40: Added users.default_require_mention column (per-user default
+  // for require_mention on auto-registered IM group chats). The actual
+  // ensureColumn migration runs above with the other users.* additions —
+  // its position before assertSchema('users', …) matters because the
+  // schema check would otherwise reject pre-v40 databases on startup.
+  const SCHEMA_VERSION = '40';
   db.prepare(
     'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
   ).run('schema_version', SCHEMA_VERSION);
@@ -3357,6 +3369,7 @@ function mapUserRow(row: Record<string, unknown>): User {
       typeof row.cursor_model === 'string' && row.cursor_model.length > 0
         ? row.cursor_model
         : null,
+    default_require_mention: !!row.default_require_mention,
     created_at: String(row.created_at),
     updated_at: String(row.updated_at),
     last_login_at:
@@ -3385,6 +3398,7 @@ function toUserPublic(user: User, lastActiveAt: string | null): UserPublic {
     ai_avatar_url: user.ai_avatar_url,
     default_runtime: user.default_runtime,
     cursor_model: user.cursor_model,
+    default_require_mention: user.default_require_mention,
     created_at: user.created_at,
     last_login_at: user.last_login_at,
     last_active_at: lastActiveAt,
@@ -3674,6 +3688,7 @@ export function updateUserFields(
       | 'ai_avatar_url'
       | 'default_runtime'
       | 'cursor_model'
+      | 'default_require_mention'
       | 'deleted_at'
     >
   >,
@@ -3765,6 +3780,10 @@ export function updateUserFields(
     values.push(
       updates.cursor_model === null ? null : String(updates.cursor_model),
     );
+  }
+  if (updates.default_require_mention !== undefined) {
+    fields.push('default_require_mention = ?');
+    values.push(updates.default_require_mention ? 1 : 0);
   }
   if (updates.deleted_at !== undefined) {
     fields.push('deleted_at = ?');

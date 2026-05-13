@@ -61,6 +61,7 @@ export interface UserPublic {
   default_runtime: Runtime;
   /** Per-user default Cursor model. `null` = inherit env / hard default. */
   cursor_model: string | null;
+  default_require_mention: boolean;
 }
 
 export interface AppearanceConfig {
@@ -105,6 +106,7 @@ interface AuthState {
      * hard-coded default). Pass a model id (e.g. `'claude-opus-4-7-thinking-max'`)
      * to pin per-user. Omit to leave unchanged. */
     cursor_model?: string | null;
+    default_require_mention?: boolean;
   }) => Promise<void>;
   uploadAvatar: (file: File, target?: 'user' | 'ai') => Promise<string>;
   fetchAppearance: () => Promise<void>;

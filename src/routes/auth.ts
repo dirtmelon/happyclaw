@@ -89,6 +89,7 @@ export function toUserPublic(u: User): UserPublic {
     ai_avatar_url: u.ai_avatar_url ?? null,
     default_runtime: u.default_runtime,
     cursor_model: u.cursor_model ?? null,
+    default_require_mention: u.default_require_mention,
     created_at: u.created_at,
     last_login_at: u.last_login_at,
     last_active_at: null,
@@ -606,6 +607,9 @@ authRoutes.put('/profile', authMiddleware, async (c) => {
   }
   if (validation.data.cursor_model !== undefined) {
     updates.cursor_model = validation.data.cursor_model;
+  }
+  if (validation.data.default_require_mention !== undefined) {
+    updates.default_require_mention = validation.data.default_require_mention;
   }
   if (Object.keys(updates).length === 0) {
     return c.json({ error: 'No fields to update' }, 400);
