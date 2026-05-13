@@ -1371,6 +1371,65 @@ export function setLastGroupSync(): void {
 }
 
 /**
+ * Coerce a value flowing through a TEXT-affinity column into a JS string.
+ *
+ * SQLite is dynamically typed: a TEXT column will silently accept a
+ * Buffer/Uint8Array binding and store it as BLOB. better-sqlite3 reads such
+ * cells back as Buffer, which propagates through JSON.stringify as
+ * `{type:"Buffer",data:[…]}` and breaks any consumer expecting a string.
+ *
+ * Wraps both write paths (where `warnField` surfaces the offending caller)
+ * and read paths (no `warnField`, silent normalization of legacy bad data).
+ */
+function toUtf8String(value: unknown, warnField?: string): string {
+  if (typeof value === 'string') return value;
+  if (value == null) return '';
+  if (Buffer.isBuffer(value) || value instanceof Uint8Array) {
+    const decoded = Buffer.from(value as Uint8Array).toString('utf8');
+    if (warnField) {
+      logger.warn(
+        { field: warnField, byteLen: (value as Uint8Array).byteLength, sample: decoded.slice(0, 80) },
+        'toUtf8String: Buffer on TEXT column, decoded as UTF-8',
+      );
+    }
+    return decoded;
+  }
+  const coerced = String(value);
+  if (warnField) {
+    logger.warn(
+      { field: warnField, jsType: typeof value, sample: coerced.slice(0, 80) },
+      'toUtf8String: non-string on TEXT column, coerced via String()',
+    );
+  }
+  return coerced;
+}
+
+/** Variant that preserves null (vs the default '' fallback). */
+function toUtf8StringOrNull(value: unknown): string | null {
+  return value == null ? null : toUtf8String(value);
+}
+
+/** Normalize a raw message row from sqlite: decode content + boolify is_from_me.
+ *  The is_from_me overload must come first — TS overload resolution stops at
+ *  the first match and `NewMessage & { is_from_me: number }` is a subtype of
+ *  `NewMessage`. */
+function normalizeMessageRow(
+  row: NewMessage & { is_from_me: number },
+): NewMessage & { is_from_me: boolean };
+function normalizeMessageRow(row: NewMessage): NewMessage;
+function normalizeMessageRow(row: NewMessage & { is_from_me?: number }): NewMessage & { is_from_me?: boolean } {
+  const { is_from_me, content, ...rest } = row;
+  const out: NewMessage & { is_from_me?: boolean } = {
+    ...rest,
+    content: toUtf8String(content),
+  };
+  if (typeof is_from_me === 'number') {
+    out.is_from_me = is_from_me === 1;
+  }
+  return out;
+}
+
+/**
  * Ensure a chat row exists in the chats table (avoids FK violation on messages insert).
  */
 export function ensureChatExists(chatJid: string): void {
@@ -1410,7 +1469,7 @@ export function storeMessageDirect(
     sourceJid ?? chatJid,
     sender,
     senderName,
-    content,
+    toUtf8String(content, 'messages.content'),
     timestamp,
     isFromMe ? 1 : 0,
     attachments ?? null,
@@ -1423,6 +1482,41 @@ export function storeMessageDirect(
     meta?.taskId ?? null,
   );
   return effectiveMsgId;
+}
+
+/**
+ * Overwrite the `attachments` JSON column for a single message row.
+ *
+ * Used by the plugin-command expander to persist the expanded-prompt
+ * sentinel after inline `!` commands run successfully (P1 round-14
+ * crash-safety): the next recovery pass reads the sentinel and reuses
+ * the stored prompt instead of re-executing inline.
+ */
+export function updateMessageAttachments(
+  chatJid: string,
+  msgId: string,
+  attachmentsJson: string,
+): void {
+  db.prepare(
+    `UPDATE messages SET attachments = ? WHERE id = ? AND chat_jid = ?`,
+  ).run(attachmentsJson, msgId, chatJid);
+}
+
+/**
+ * Read the `attachments` JSON column for a single message row, or null
+ * if the row is missing (caller treats null as "no persisted state").
+ */
+export function getMessageAttachments(
+  chatJid: string,
+  msgId: string,
+): string | null {
+  const row = db
+    .prepare(
+      `SELECT attachments FROM messages WHERE id = ? AND chat_jid = ? LIMIT 1`,
+    )
+    .get(msgId, chatJid) as { attachments: string | null } | undefined;
+  if (!row) return null;
+  return row.attachments ?? null;
 }
 
 /**
@@ -1876,12 +1970,13 @@ export function getNewMessages(
 ): { messages: NewMessage[]; newCursor: MessageCursor } {
   if (jids.length === 0) return { messages: [], newCursor: cursor };
 
-  const rows = getNewMessagesStmt(jids.length).all(
+  const rawRows = getNewMessagesStmt(jids.length).all(
     cursor.timestamp,
     cursor.timestamp,
     cursor.id,
     ...jids,
   ) as NewMessage[];
+  const rows = rawRows.map((r) => normalizeMessageRow(r));
   const last = rows[rows.length - 1];
   return {
     messages: rows,
@@ -1893,12 +1988,13 @@ export function getMessagesSince(
   chatJid: string,
   cursor: MessageCursor,
 ): NewMessage[] {
-  return stmts().getMessagesSince.all(
+  const rows = stmts().getMessagesSince.all(
     chatJid,
     cursor.timestamp,
     cursor.timestamp,
     cursor.id,
   ) as NewMessage[];
+  return rows.map((row) => normalizeMessageRow(row));
 }
 
 export function createTask(
@@ -1913,12 +2009,14 @@ export function createTask(
     task.id,
     task.group_folder,
     task.chat_jid,
-    task.prompt,
+    toUtf8String(task.prompt, 'scheduled_tasks.prompt'),
     task.schedule_type,
     task.schedule_value,
     task.context_mode || 'group',
     task.execution_type || 'agent',
-    task.script_command ?? null,
+    task.script_command == null
+      ? null
+      : toUtf8String(task.script_command, 'scheduled_tasks.script_command'),
     task.execution_mode ?? null,
     task.next_run,
     task.status,
@@ -1944,6 +2042,9 @@ function mapTaskRow(row: unknown): ScheduledTask {
   if (r.execution_mode === undefined) r.execution_mode = null;
   if (r.workspace_jid === undefined) r.workspace_jid = null;
   if (r.workspace_folder === undefined) r.workspace_folder = null;
+  // Defensive: legacy BLOB cells in TEXT-affinity columns come back as Buffer.
+  r.prompt = toUtf8String(r.prompt);
+  if (r.script_command !== undefined) r.script_command = toUtf8StringOrNull(r.script_command);
   return r as ScheduledTask;
 }
 
@@ -1993,7 +2094,7 @@ export function updateTask(
 
   if (updates.prompt !== undefined) {
     fields.push('prompt = ?');
-    values.push(updates.prompt);
+    values.push(toUtf8String(updates.prompt, 'scheduled_tasks.prompt'));
   }
   if (updates.schedule_type !== undefined) {
     fields.push('schedule_type = ?');
@@ -2017,7 +2118,11 @@ export function updateTask(
   }
   if (updates.script_command !== undefined) {
     fields.push('script_command = ?');
-    values.push(updates.script_command);
+    values.push(
+      updates.script_command == null
+        ? null
+        : toUtf8String(updates.script_command, 'scheduled_tasks.script_command'),
+    );
   }
   if (updates.next_run !== undefined) {
     fields.push('next_run = ?');
@@ -2108,6 +2213,19 @@ export function updateTaskAfterRun(
     WHERE id = ?
   `,
   ).run(nextRun, now, lastResult, nextRun, id);
+}
+
+// Advance next_run for a task we deliberately did NOT execute (e.g. overdue
+// beyond the backfill grace window). Does not touch last_run, so the task
+// detail view continues to reflect the last *actual* run.
+export function advanceSkippedTask(id: string, nextRun: string | null): void {
+  db.prepare(
+    `
+    UPDATE scheduled_tasks
+    SET next_run = ?, status = CASE WHEN ? IS NULL THEN 'completed' ELSE status END
+    WHERE id = ?
+  `,
+  ).run(nextRun, nextRun, id);
 }
 
 export function logTaskRun(log: TaskRunLog): void {
@@ -2980,10 +3098,7 @@ export function getMessagesPage(
     NewMessage & { is_from_me: number }
   >;
 
-  return rows.map((row) => ({
-    ...row,
-    is_from_me: row.is_from_me === 1,
-  }));
+  return rows.map((row) => normalizeMessageRow(row));
 }
 
 /**
@@ -3006,10 +3121,7 @@ export function getMessagesAfter(
     )
     .all(chatJid, after, limit) as Array<NewMessage & { is_from_me: number }>;
 
-  return rows.map((row) => ({
-    ...row,
-    is_from_me: row.is_from_me === 1,
-  }));
+  return rows.map((row) => normalizeMessageRow(row));
 }
 
 /**
@@ -3043,10 +3155,7 @@ export function getMessagesPageMulti(
     NewMessage & { is_from_me: number }
   >;
 
-  return rows.map((row) => ({
-    ...row,
-    is_from_me: row.is_from_me === 1,
-  }));
+  return rows.map((row) => normalizeMessageRow(row));
 }
 
 /**
@@ -3074,10 +3183,7 @@ export function getMessagesAfterMulti(
     NewMessage & { is_from_me: number }
   >;
 
-  return rows.map((row) => ({
-    ...row,
-    is_from_me: row.is_from_me === 1,
-  }));
+  return rows.map((row) => normalizeMessageRow(row));
 }
 
 /**
@@ -3123,10 +3229,7 @@ export function getMessagesByTimeRange(
     NewMessage & { is_from_me: number }
   >;
 
-  return rows.map((row) => ({
-    ...row,
-    is_from_me: row.is_from_me === 1,
-  }));
+  return rows.map((row) => normalizeMessageRow(row));
 }
 
 /**

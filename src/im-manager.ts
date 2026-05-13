@@ -17,6 +17,7 @@ import {
   createDingTalkChannel,
   createDiscordChannel,
   isDiscordChannel,
+  createWhatsAppChannel,
 } from './im-channel.js';
 import type {
   DiscordHistoryMessage,
@@ -30,6 +31,13 @@ import type { QQConnectionConfig } from './qq.js';
 import type { WeChatConnectionConfig } from './wechat.js';
 import type { DingTalkConnectionConfig } from './dingtalk.js';
 import type { DiscordConnectionConfig } from './discord.js';
+import {
+  getWhatsAppAuthDir,
+  type WhatsAppConnectionConfig,
+  type WhatsAppConnectionState,
+} from './whatsapp.js';
+import { rm } from 'fs/promises';
+import { DATA_DIR } from './config.js';
 import type { StreamingSession } from './im-channel.js';
 import { getRegisteredGroup, getJidsByFolder } from './db.js';
 import { getUserDingTalkConfig } from './runtime-config.js';
@@ -80,6 +88,19 @@ export interface DiscordConnectConfig {
   streamingMode?: 'edit' | 'off';
 }
 
+export interface WhatsAppConnectConfig {
+  accountId?: string;
+  phoneNumber?: string;
+  authDir?: string;
+  enabled?: boolean;
+}
+
+/**
+ * Re-export from src/whatsapp.ts as the canonical state shape.
+ * Kept as a type alias so existing imports from im-manager continue to work.
+ */
+export type WhatsAppConnectionStateSnapshot = WhatsAppConnectionState;
+
 export interface ConnectFeishuOptions {
   ignoreMessagesBefore?: number;
   onCommand?: (chatJid: string, command: string, senderImId?: string, mentions?: Array<{ key?: string; name?: string; id?: { open_id?: string } }>) => Promise<string | null>;
@@ -101,6 +122,7 @@ export interface ConnectFeishuOptions {
 class IMConnectionManager {
   private connections = new Map<string, UserIMConnection>();
   private adminUserIds = new Set<string>();
+  private lastWhatsAppState = new Map<string, WhatsAppConnectionStateSnapshot>();
 
   /** Register a user ID as admin (for fallback routing) */
   registerAdminUser(userId: string): void {
@@ -611,6 +633,128 @@ class IMConnectionManager {
   }
 
   /**
+   * Connect a WhatsApp instance for a specific user.
+   *
+   * M1：接入 Baileys，QR 状态通过 onConnectionUpdate 推到上层（最终经 WS 推前端）。
+   * 缓存最近一次 state 到 lastWhatsAppState，前端刷新页面时通过 GET 接口拿到。
+   */
+  async connectUserWhatsApp(
+    userId: string,
+    config: WhatsAppConnectConfig,
+    onNewChat: (chatJid: string, chatName: string) => void,
+    options?: {
+      ignoreMessagesBefore?: number;
+      onCommand?: (chatJid: string, command: string) => Promise<string | null>;
+      resolveGroupFolder?: (jid: string) => string | undefined;
+      resolveEffectiveChatJid?: (
+        chatJid: string,
+      ) => { effectiveJid: string; agentId: string | null } | null;
+      onAgentMessage?: (baseChatJid: string, agentId: string) => void;
+      onBotAddedToGroup?: (chatJid: string, chatName: string) => void;
+      onBotRemovedFromGroup?: (chatJid: string) => void;
+      shouldProcessGroupMessage?: (
+        chatJid: string,
+        senderImId?: string,
+      ) => boolean;
+      isGroupOwnerMessage?: (
+        chatJid: string,
+        senderImId?: string,
+      ) => boolean;
+      isSenderAllowedInGroup?: (
+        chatJid: string,
+        senderImId?: string,
+      ) => boolean;
+      onConnectionUpdate?: (
+        userId: string,
+        state: WhatsAppConnectionStateSnapshot,
+      ) => void;
+    },
+  ): Promise<boolean> {
+    const channel = createWhatsAppChannel(
+      {
+        accountId: config.accountId,
+        phoneNumber: config.phoneNumber,
+        authDir:
+          config.authDir ??
+          getWhatsAppAuthDir(DATA_DIR, userId, config.accountId),
+      },
+      (state) => {
+        this.lastWhatsAppState.set(userId, state);
+        options?.onConnectionUpdate?.(userId, state);
+      },
+    );
+
+    return this.connectChannel(userId, 'whatsapp', channel, {
+      onReady: () => {
+        logger.info({ userId }, 'User WhatsApp channel ready');
+      },
+      onNewChat,
+      ignoreMessagesBefore: options?.ignoreMessagesBefore,
+      onCommand: options?.onCommand,
+      resolveGroupFolder: options?.resolveGroupFolder,
+      resolveEffectiveChatJid: options?.resolveEffectiveChatJid,
+      onAgentMessage: options?.onAgentMessage,
+      onBotAddedToGroup: options?.onBotAddedToGroup,
+      onBotRemovedFromGroup: options?.onBotRemovedFromGroup,
+      shouldProcessGroupMessage: options?.shouldProcessGroupMessage,
+      isGroupOwnerMessage: options?.isGroupOwnerMessage,
+      isSenderAllowedInGroup: options?.isSenderAllowedInGroup,
+    });
+  }
+
+  getUserWhatsAppState(userId: string): WhatsAppConnectionStateSnapshot {
+    return (
+      this.lastWhatsAppState.get(userId) ?? { status: 'disconnected' as const }
+    );
+  }
+
+  async disconnectUserWhatsApp(userId: string): Promise<void> {
+    await this.disconnectChannel(userId, 'whatsapp');
+  }
+
+  /**
+   * Full logout for WhatsApp: send logout to WhatsApp servers, drop the socket,
+   * and wipe the local auth state directory so the next enable starts fresh
+   * (forces a new QR scan, possibly a different account).
+   *
+   * Distinct from disconnectUserWhatsApp, which only closes the socket but
+   * keeps the noise/Signal pre-keys on disk for silent reconnect.
+   */
+  async logoutUserWhatsApp(userId: string, accountId?: string): Promise<void> {
+    const conn = this.connections.get(userId);
+    const channel = conn?.channels.get('whatsapp');
+    // Best-effort: ask Baileys to send the logout to WhatsApp servers before
+    // we tear the socket down. If we already disconnected, the disk wipe below
+    // still clears the persisted credentials, so the user can rescan.
+    const maybeLogout = (
+      channel as unknown as { logout?: () => Promise<void> } | undefined
+    )?.logout;
+    if (typeof maybeLogout === 'function') {
+      try {
+        await maybeLogout.call(channel);
+      } catch (err) {
+        logger.warn(
+          { err, userId },
+          'WhatsApp channel.logout() threw, continuing with auth wipe',
+        );
+      }
+    }
+    await this.disconnectChannel(userId, 'whatsapp');
+    this.lastWhatsAppState.delete(userId);
+
+    const authDir = getWhatsAppAuthDir(DATA_DIR, userId, accountId || 'default');
+    try {
+      await rm(authDir, { recursive: true, force: true });
+      logger.info({ userId, authDir }, 'WhatsApp auth state wiped');
+    } catch (err) {
+      logger.warn(
+        { err, userId, authDir },
+        'WhatsApp authDir wipe failed (state already gone or perms)',
+      );
+    }
+  }
+
+  /**
    * Connect a DingTalk Stream instance for a specific user.
    */
   async connectUserDingTalk(
@@ -835,6 +979,11 @@ class IMConnectionManager {
   isDiscordConnected(userId: string): boolean {
     const conn = this.connections.get(userId);
     return conn?.channels.get('discord')?.isConnected() ?? false;
+  }
+
+  isWhatsAppConnected(userId: string): boolean {
+    const conn = this.connections.get(userId);
+    return conn?.channels.get('whatsapp')?.isConnected() ?? false;
   }
 
   /** Get the Feishu channel for a user (for direct access like syncGroups) */

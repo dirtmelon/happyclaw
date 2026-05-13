@@ -140,6 +140,19 @@ const fields: FieldConfig[] = [
     max: 2000,
     step: 10,
   },
+  {
+    key: 'taskBackfillGraceMs',
+    label: '定时任务逾期容忍窗口',
+    description:
+      '停机/重启后，next_run 落在过去且距今超过该窗口的任务直接跳过本次（推到下一次触发），'
+      + '避免跨天积压的多个任务在重启那一秒集体并发刷屏。0 = 关闭（旧行为）。',
+    unit: '分钟',
+    toDisplay: (v) => Math.round(v / 60000),
+    toStored: (v) => v * 60000,
+    min: 0,
+    max: 1440,
+    step: 1,
+  },
 ];
 
 export function SystemSettingsSection() {
@@ -153,6 +166,7 @@ export function SystemSettingsSection() {
   const [billingCurrencyRate, setBillingCurrencyRate] = useState(1);
   const [externalClaudeDir, setExternalClaudeDir] = useState('');
   const [disableMemoryLayerForAdminHost, setDisableMemoryLayerForAdminHost] = useState(false);
+  const [pluginAutoScan, setPluginAutoScan] = useState<boolean>(true);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
@@ -179,6 +193,7 @@ export function SystemSettingsSection() {
         setBillingCurrencyRate(data.billingCurrencyRate ?? 1);
         setExternalClaudeDir(data.externalClaudeDir ?? '');
         setDisableMemoryLayerForAdminHost(data.disableMemoryLayerForAdminHost ?? false);
+        setPluginAutoScan(data.pluginAutoScan ?? true);
       } catch (err) {
         toast.error(getErrorMessage(err, '加载系统参数失败'));
       } finally {
@@ -225,6 +240,7 @@ export function SystemSettingsSection() {
         billingCurrencyRate,
         externalClaudeDir,
         disableMemoryLayerForAdminHost,
+        pluginAutoScan,
       };
       for (const f of fields) {
         const val = displayValues[f.key];
@@ -245,6 +261,7 @@ export function SystemSettingsSection() {
       setBillingCurrencyRate(data.billingCurrencyRate ?? 1);
       setExternalClaudeDir(data.externalClaudeDir ?? '');
       setDisableMemoryLayerForAdminHost(data.disableMemoryLayerForAdminHost ?? false);
+      setPluginAutoScan(data.pluginAutoScan ?? true);
       // 刷新计费状态，更新导航栏可见性
       loadBillingStatus();
       toast.success('系统参数已保存，新参数将对后续启动的容器/进程生效');
@@ -421,6 +438,34 @@ export function SystemSettingsSection() {
             </div>
           </>
         )}
+      </div>
+
+      {/* Plugin Catalog 自动扫描 */}
+      <div className="border-t border-border pt-6 space-y-5">
+        <h3 className="text-sm font-semibold text-foreground">Plugin Catalog 自动扫描</h3>
+
+        <div className="flex items-center justify-between">
+          <div className="flex-1 pr-4">
+            <Label>启动 5s + 每小时自动扫描宿主机 marketplace</Label>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              开启时（默认）服务启动 5 秒后扫一次 ~/.claude/plugins/marketplaces/ 入共享 catalog，
+              并每小时自动扫一次。关闭后定时扫描全部停掉，admin 仍可在 Plugins 页手动点扫描按钮。
+            </p>
+            <p className="text-xs text-muted-foreground mt-2">
+              <strong>适用场景</strong>：本机有不希望被自动入共享 catalog 的私有 plugin、
+              或需要严格控制 catalog 变更时机的环境。关闭时已 enable 的 plugin 不受影响。
+            </p>
+            <p className="text-xs text-orange-600 mt-2">
+              <strong>注意</strong>：定时扫描器仅在服务启动时按当前值注册一次，
+              修改后需重启服务才能生效（关闭后已运行的 interval 仍会继续到下次重启）。
+            </p>
+          </div>
+          <Switch
+            checked={pluginAutoScan}
+            onCheckedChange={setPluginAutoScan}
+            aria-label="Plugin Catalog 自动扫描"
+          />
+        </div>
       </div>
 
       {/* 禁用 HappyClaw 记忆层（admin 主容器专用） */}

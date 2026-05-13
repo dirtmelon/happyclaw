@@ -1200,6 +1200,19 @@ async function runQuery(
     }
   }
 
+  // Claude Code plugins injected by HappyClaw main process via ContainerInput.
+  // SDK converts this array to `--plugin-dir <path>` args for the spawned
+  // claude CLI, which loads each plugin's commands/agents/hooks/skills/mcp.
+  // Paths are already runtime-translated upstream (container-internal for
+  // Docker, host absolute for host mode).
+  const userPlugins =
+    containerInput.plugins && containerInput.plugins.length > 0
+      ? containerInput.plugins
+      : undefined;
+  if (userPlugins) {
+    log(`Loading ${userPlugins.length} plugin(s): ${userPlugins.map((p) => p.path).join(', ')}`);
+  }
+
   try {
     const q = query({
     prompt: stream,
@@ -1220,6 +1233,7 @@ async function runQuery(
       settingSources: ['project', 'user'],
       includePartialMessages: true,
       ...(Object.keys(flagSettings).length > 0 ? { settings: flagSettings as any } : {}),
+      ...(userPlugins && { plugins: userPlugins }),
       mcpServers: {
         ...loadUserMcpServers(),     // 用户配置的 MCP（stdio/http/sse），SDK 原生支持
         happyclaw: mcpServerConfig,  // 内置 SDK MCP 放最后，确保不被同名覆盖
@@ -1341,7 +1355,13 @@ async function runQuery(
               .join('')
           : '';
         if (topLevelText) {
-          canonicalAssistantText = topLevelText;
+          // Accumulate rather than overwrite. The SDK splits assistant output
+          // into multiple messages around each tool_use call (text → tool_use →
+          // text → tool_use → text...), so taking only the last message's text
+          // drops everything emitted before the first tool call. The canonical
+          // text must be the concatenation of all top-level text content blocks
+          // in this turn.
+          canonicalAssistantText = (canonicalAssistantText || '') + topLevelText;
           canonicalAssistantUuid = assistantMsg.uuid as string;
         }
       }

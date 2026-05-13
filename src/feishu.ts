@@ -23,6 +23,11 @@ import {
 } from './feishu-streaming-card.js';
 import { optimizeMarkdownStyle } from './feishu-markdown-style.js';
 import { buildAgentReplyCard } from './feishu-cards/builder.js';
+import {
+  evaluateMentionGate,
+  isBotMentioned,
+  type MentionGateMention,
+} from './feishu-mention-gate.js';
 import type { FeishuMessageMeta } from './types.js';
 
 // ─── FeishuConnection Interface ────────────────────────────────
@@ -119,6 +124,12 @@ const WS_RECONNECT_MIN_INTERVAL_MS = 30_000;
 const BACKFILL_LOOKBACK_MS = 5 * 60 * 1000;
 const BACKFILL_PAGE_SIZE = 50;
 const BACKFILL_MAX_PAGES_PER_CHAT = 5;
+// 启动期 bot info 拉取的最大重试次数（指数退避 1s/2s/4s）
+const BOT_INFO_FETCH_MAX_ATTEMPTS = 4;
+// botOpenId 缺失时 lazy refetch 的最小间隔，避免对 OAPI 高频骚扰
+const BOT_INFO_REFETCH_MIN_INTERVAL_MS = 60_000;
+// "因 botOpenId 缺失而丢消息" 的 warn 节流间隔，避免日志刷屏
+const BOT_INFO_MISSING_WARN_INTERVAL_MS = 5 * 60 * 1000;
 
 interface FeishuMentionLike {
   key?: string;
@@ -518,6 +529,13 @@ export function createFeishuConnection(
   let disconnectedChecks = 0;
   let disconnectedSince: number | null = null;
   let healthTimer: NodeJS.Timeout | null = null;
+  // botOpenId 自愈状态：lastBotInfoFetchAt 防止 lazy refetch 高频骚扰 OAPI；
+  // botInfoRefetchInFlight 防止并发拉取
+  let lastBotInfoFetchAt = 0;
+  let botInfoRefetchInFlight: Promise<void> | null = null;
+  // mention gate fail-closed 的 warn 节流：避免 botOpenId 长时间缺失时日志洪水
+  let lastBotInfoMissingWarnAt = 0;
+  let botInfoMissingDroppedSinceLastWarn = 0;
 
   function rememberChatProgress(chatId: string, createTimeMs: number, chatType?: string): void {
     knownChatIds.add(chatId);
@@ -569,8 +587,87 @@ export function createFeishuConnection(
     stopHealthMonitor();
     healthTimer = setInterval(() => {
       void checkConnectionHealth();
+      // 兜底：botOpenId 缺失时让健康检查顺手 lazy refetch；
+      // 启动期 retry 失败 / 飞书短暂抖动后能在几分钟内自动恢复 mention 守卫。
+      if (!botOpenId) {
+        void ensureBotOpenIdFresh('health-check');
+      }
     }, WS_HEALTH_CHECK_INTERVAL_MS);
     healthTimer.unref?.();
+  }
+
+  /**
+   * 拉取 bot open_id —— 启动期与自愈共用入口。
+   * 失败时返回空串，由调用方决定是否重试。
+   */
+  async function fetchBotOpenIdOnce(): Promise<string> {
+    if (!client) return '';
+    try {
+      const botInfoRes = await client.request({
+        method: 'GET',
+        url: '/open-apis/bot/v3/info/',
+      });
+      const info = botInfoRes as {
+        bot?: { open_id?: string };
+        data?: { bot?: { open_id?: string } };
+      };
+      return info?.bot?.open_id || info?.data?.bot?.open_id || '';
+    } catch (err) {
+      logger.debug({ err }, 'fetchBotOpenIdOnce failed');
+      return '';
+    }
+  }
+
+  /**
+   * 启动期带指数退避的 bot open_id 拉取。最多 4 次（间隔 0/1s/2s/4s）。
+   * 即使全部失败也不阻塞 connect()，由 ensureBotOpenIdFresh() 后续兜底。
+   */
+  async function fetchBotOpenIdWithRetry(): Promise<void> {
+    for (let attempt = 0; attempt < BOT_INFO_FETCH_MAX_ATTEMPTS; attempt++) {
+      if (attempt > 0) {
+        await new Promise((r) => setTimeout(r, 1000 * 2 ** (attempt - 1)));
+      }
+      const id = await fetchBotOpenIdOnce();
+      lastBotInfoFetchAt = Date.now();
+      if (id) {
+        botOpenId = id;
+        logger.info(
+          { botOpenId, attempt: attempt + 1 },
+          'Fetched bot open_id for mention detection',
+        );
+        return;
+      }
+    }
+    logger.warn(
+      { attempts: BOT_INFO_FETCH_MAX_ATTEMPTS },
+      'Could not fetch bot open_id after retries; mention gating will fail-closed until recovered',
+    );
+  }
+
+  /**
+   * 后台 lazy refetch：消息进入 mention 门控前若发现 botOpenId 仍空，触发一次。
+   * 用 lastBotInfoFetchAt 节流，避免每条消息都打 OAPI；并发安全（in-flight Promise 复用）。
+   */
+  function ensureBotOpenIdFresh(reason: string): Promise<void> {
+    if (botOpenId) return Promise.resolve();
+    if (botInfoRefetchInFlight) return botInfoRefetchInFlight;
+    const now = Date.now();
+    if (now - lastBotInfoFetchAt < BOT_INFO_REFETCH_MIN_INTERVAL_MS) {
+      return Promise.resolve();
+    }
+    botInfoRefetchInFlight = (async () => {
+      const id = await fetchBotOpenIdOnce();
+      lastBotInfoFetchAt = Date.now();
+      if (id) {
+        botOpenId = id;
+        logger.info({ botOpenId, reason }, 'Recovered bot open_id (lazy refetch)');
+      } else {
+        logger.debug({ reason }, 'Lazy refetch of bot open_id still failed');
+      }
+    })().finally(() => {
+      botInfoRefetchInFlight = null;
+    });
+    return botInfoRefetchInFlight;
   }
 
   function isDuplicate(msgId: string): boolean {
@@ -1049,8 +1146,10 @@ export function createFeishuConnection(
     if (chatType === 'group' && isSenderAllowedInGroup && !isSenderAllowedInGroup(chatJid, senderOpenId)) {
       // 被 @bot 时回 SILENT 表情表达「看到但故意不回复」，让发言者知道 bot 并非无响应而是被白名单挡掉；
       // 未 @bot 时静默丢弃，避免把群聊闲聊污染成一堆表情。
-      const isBotMentioned = !!botOpenId && (mentions?.some((m) => m.id?.open_id === botOpenId) ?? false);
-      if (isBotMentioned) {
+      // botOpenId 缺失时 isBotMentioned() 返回 false → 不加 SILENT 反应。
+      // 反应只是 courtesy（消息已被 allowlist 决定丢弃），不能确认 @ 时宁可不加。
+      // 与下方 mention gate 的 fail-closed 方向相反：那里是业务正确性边界，必须确认。
+      if (isBotMentioned(botOpenId, mentions as MentionGateMention[] | undefined)) {
         addReaction(messageId, 'SILENT').catch(() => {});
         logger.debug(
           { chatJid, messageId, senderOpenId },
@@ -1066,23 +1165,57 @@ export function createFeishuConnection(
     }
 
     // ── 群聊 Mention 过滤：require_mention / owner_mentioned 模式下过滤 ──
-    if (chatType === 'group' && shouldProcessGroupMessage) {
-      const isBotMentioned = botOpenId
-        ? (mentions?.some((m) => m.id?.open_id === botOpenId) ?? false)
-        : true; // 无 bot open_id 时默认放行（安全降级）
-      if (!isBotMentioned && !shouldProcessGroupMessage(chatJid, senderOpenId)) {
-        logger.debug(
-          { chatJid, messageId },
-          'Dropped group message: mention required but bot not mentioned',
-        );
-        return;
-      }
-      // owner_mentioned 模式：bot 被 @mention 但发送者不是 owner 时丢弃
-      if (isBotMentioned && isGroupOwnerMessage && !isGroupOwnerMessage(chatJid, senderOpenId)) {
-        logger.debug(
-          { chatJid, messageId, senderOpenId },
-          'Dropped group message: owner_mentioned mode, sender is not owner',
-        );
+    // 决策由 evaluateMentionGate（src/feishu-mention-gate.ts）以纯函数形式给出，
+    // 历史上这里曾因 botOpenId 缺失而 fail-open 静默失效；新版 fail-closed，
+    // 并通过 ensureBotOpenIdFresh() 触发后台 lazy refetch 自愈。
+    {
+      const decision = evaluateMentionGate({
+        chatType,
+        botOpenId,
+        mentions: mentions as MentionGateMention[] | undefined,
+        chatJid,
+        senderOpenId,
+        shouldProcessGroupMessage,
+        isGroupOwnerMessage,
+      });
+      if (!decision.allow) {
+        if (decision.reason === 'bot_open_id_missing') {
+          // 触发后台 lazy refetch（节流由函数内部保证），不阻塞当前消息
+          void ensureBotOpenIdFresh('mention-gate-fallback');
+          // warn 日志按 5 分钟节流，避免 botOpenId 长时间缺失时刷屏
+          const now = Date.now();
+          botInfoMissingDroppedSinceLastWarn++;
+          if (
+            now - lastBotInfoMissingWarnAt >=
+            BOT_INFO_MISSING_WARN_INTERVAL_MS
+          ) {
+            logger.warn(
+              {
+                chatJid,
+                messageId,
+                droppedSinceLastWarn: botInfoMissingDroppedSinceLastWarn,
+              },
+              'Dropping group messages: bot open_id unknown (fail-closed). Triggered lazy refetch.',
+            );
+            lastBotInfoMissingWarnAt = now;
+            botInfoMissingDroppedSinceLastWarn = 0;
+          } else {
+            logger.debug(
+              { chatJid, messageId },
+              'Dropped group message: bot open_id missing (warn throttled)',
+            );
+          }
+        } else if (decision.reason === 'not_mentioned') {
+          logger.debug(
+            { chatJid, messageId },
+            'Dropped group message: mention required but bot not mentioned',
+          );
+        } else {
+          logger.debug(
+            { chatJid, messageId, senderOpenId },
+            'Dropped group message: owner_mentioned mode, sender is not owner',
+          );
+        }
         return;
       }
     }
@@ -1401,31 +1534,12 @@ export function createFeishuConnection(
         appType: lark.AppType.SelfBuild,
       });
 
-      // Fetch bot open_id for mention detection (best-effort, non-blocking)
-      try {
-        const botInfoRes = await client.request({
-          method: 'GET',
-          url: '/open-apis/bot/v3/info/',
-        });
-        const info = botInfoRes as { bot?: { open_id?: string }; data?: { bot?: { open_id?: string } } };
-        botOpenId = info?.bot?.open_id || info?.data?.bot?.open_id || '';
-        if (botOpenId) {
-          logger.info(
-            { botOpenId },
-            'Fetched bot open_id for mention detection',
-          );
-        } else {
-          logger.warn(
-            'Could not fetch bot open_id, mention gating will be bypassed',
-          );
-        }
-      } catch (err) {
-        logger.warn(
-          { err },
-          'Failed to fetch bot info, mention gating will be bypassed',
-        );
-        botOpenId = '';
-      }
+      // Fetch bot open_id for mention detection — 带 retry 的 best-effort 拉取。
+      // 启动期失败后，健康检查 + 进入 mention 门控前的 lazy refetch 会兜底自愈，
+      // 期间 mention 守卫维持 fail-closed（拒绝群消息），不会回退到默认放行。
+      botOpenId = '';
+      lastBotInfoFetchAt = 0;
+      await fetchBotOpenIdWithRetry();
 
       // Create event dispatcher
       eventDispatcher = new lark.EventDispatcher({}).register({

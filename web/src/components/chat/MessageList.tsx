@@ -5,6 +5,7 @@ import { useAuthStore } from '../../stores/auth';
 import { MessageBubble } from './MessageBubble';
 import { StreamingDisplay } from './StreamingDisplay';
 import { EmojiAvatar } from '../common/EmojiAvatar';
+import { ErrorBoundary } from '../common';
 import { Loader2, ChevronUp, ChevronDown, AlertTriangle, Square, Code2, Zap, BookOpen, Wrench } from 'lucide-react';
 import { useDisplayMode } from '../../hooks/useDisplayMode';
 
@@ -124,6 +125,8 @@ export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrig
             items.push({ type: 'error', content: msg.content.slice('agent_error:'.length) });
           } else if (msg.content.startsWith('agent_max_retries:')) {
             items.push({ type: 'error', content: msg.content.slice('agent_max_retries:'.length) });
+          } else if (msg.content.startsWith('system_error:')) {
+            items.push({ type: 'error', content: msg.content.slice('system_error:'.length) });
           } else if (msg.content.startsWith('system_info:')) {
             items.push({ type: 'divider', content: msg.content.slice('system_info:'.length) });
           }
@@ -503,7 +506,9 @@ export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrig
                 ref={virtualizer.measureElement}
                 data-index={virtualItem.index}
               >
-                <MessageBubble message={message} showTime={showTime} thinkingContent={thinkingCache[message.id]} thinkingDurationMs={thinkingDurationCache[message.id]} isShared={isShared} />
+                <ErrorBoundary>
+                  <MessageBubble message={message} showTime={showTime} thinkingContent={thinkingCache[message.id]} thinkingDurationMs={thinkingDurationCache[message.id]} isShared={isShared} />
+                </ErrorBoundary>
               </div>
             );
           })}

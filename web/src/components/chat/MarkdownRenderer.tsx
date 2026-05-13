@@ -193,9 +193,18 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({ content, groupJ
     : 'text-sm leading-6 text-foreground';
   const tableTextClass = variant === 'chat' ? 'text-[0.95em]' : 'text-sm';
 
-  // Streaming mode: skip expensive KaTeX + sanitize for faster renders
+  // Streaming mode: skip expensive KaTeX + sanitize for faster renders.
+  // singleDollarTextMath: false — disables `$...$` inline math so dollar-sign
+  // amounts ($113, $5.51) in everyday text aren't parsed as LaTeX. Block math
+  // ($$...$$) still works for the rare case real formulas are needed.
   const remarkPluginsList = useMemo(() =>
-    streaming ? [remarkGfm, remarkBreaks] : [remarkGfm, remarkBreaks, remarkMath],
+    streaming
+      ? [remarkGfm, remarkBreaks]
+      : [
+          remarkGfm,
+          remarkBreaks,
+          [remarkMath, { singleDollarTextMath: false }] as const,
+        ],
     [streaming]
   );
   const rehypePluginsList = useMemo(() =>

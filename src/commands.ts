@@ -22,6 +22,15 @@ export interface CommandDeps {
   setLastAgentTimestamp: (jid: string, cursor: MessageCursor) => void;
 }
 
+// ─── Command parsing ────────────────────────────────────────────
+
+export function isClearCommand(content: string): boolean {
+  return content.trim().toLowerCase() === '/clear';
+}
+
+export const SESSION_RESET_FAILURE_MESSAGE =
+  'system_error:清除上下文失败，请稍后重试';
+
 // ─── Core reset ─────────────────────────────────────────────────
 
 export async function executeSessionReset(

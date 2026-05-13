@@ -38,6 +38,14 @@ import { isApiError } from './agent-output-parser.js';
 import type { ClaudeProviderConfig } from './runtime-config.js';
 import { loadUserMcpServers } from './mcp-utils.js';
 import {
+  getUserRuntimeRoot,
+  loadUserPlugins,
+  CONTAINER_PLUGINS_PATH,
+  type SdkPluginConfig,
+} from './plugin-utils.js';
+import { materializeUserRuntime } from './plugin-materializer.js';
+import { invalidateUserCommandIndex } from './plugin-command-index.js';
+import {
   checkHostCapabilities,
   logCapabilityPreflight,
 } from './agent-capabilities.js';
@@ -206,6 +214,12 @@ export interface ContainerInput {
   images?: Array<{ data: string; mimeType?: string }>;
   agentId?: string;
   agentName?: string;
+  /**
+   * Claude Code plugins to inject into the SDK query (via `options.plugins`).
+   * Populated just-in-time by runContainerAgent/runHostAgent from the owner's
+   * plugins.json; never set by the caller.
+   */
+  plugins?: Array<{ type: 'local'; path: string }>;
 }
 
 export interface ContainerOutput {
@@ -373,7 +387,34 @@ function trySelectPoolProvider(
   }
 }
 
-function buildVolumeMounts(
+/**
+ * Best-effort pre-spawn materialize for host-mode plugins. Mirrors the docker
+ * path's behaviour in `buildVolumeMounts`: v2 config can exist before the
+ * runtime/ tree is built (first enable, or after orphan GC), and
+ * `loadUserPlugins({runtime:'host'})` only emits paths whose manifests exist
+ * on disk. Without this call host agents would silently start with 0 plugins
+ * even when the user has plugins enabled. Failure is logged, never thrown —
+ * the agent simply starts with whatever subset is already materialized.
+ */
+export function prepareHostPlugins(ownerId: string | null | undefined): SdkPluginConfig[] {
+  if (!ownerId) return [];
+  try {
+    materializeUserRuntime(ownerId);
+  } catch (err) {
+    logger.warn(
+      { ownerId, err },
+      'prepareHostPlugins: materializeUserRuntime failed; host agent will see no plugins',
+    );
+  }
+  // Drop the user's command index cache so a stale empty entry (e.g. a prior
+  // /commands hit before runtime existed, see plugin-command-index.ts:235) is
+  // rebuilt against the now-materialized tree. Invalidate on both success and
+  // failure paths: a partial materialize still wants the cache rebuilt.
+  invalidateUserCommandIndex(ownerId);
+  return loadUserPlugins(ownerId, { runtime: 'host' });
+}
+
+export function buildVolumeMounts(
   group: RegisteredGroup,
   isAdminHome: boolean,
   /** Resolved agent backend; baked into the per-container env file as
@@ -532,6 +573,42 @@ function buildVolumeMounts(
       hostPath: userFeishuCliDir,
       containerPath: '/home/node/.feishu-cli',
       readonly: false,
+    });
+  }
+
+  // Claude Code plugins (per-user runtime): read-only mount so the CLI inside
+  // the container can load the same plugin directories referenced by
+  // ContainerInput.plugins.
+  //
+  // Admin home runs in `host` mode and bypasses container mounts entirely,
+  // so plugin materialization for that path happens inside runHostAgent's
+  // host-runtime loadUserPlugins. Here we only handle docker-mode containers.
+  //
+  // Materialize is synchronous so the runtime tree is on disk before the mount
+  // source is picked — loadUserPlugins(docker) returns paths shaped like
+  // /workspace/plugins/snapshots/{snap}/{mp}/{plugin}, which only resolve when
+  // runtime/{userId}/ is mounted at /workspace/plugins. The runtime root is
+  // mkdir'd unconditionally so the bind mount target exists even for users
+  // with no enabled plugins yet (an empty mount surfaces nothing to the CLI,
+  // matching their config).
+  if (ownerId) {
+    const runtimeRoot = getUserRuntimeRoot(ownerId);
+    fs.mkdirSync(runtimeRoot, { recursive: true });
+    try {
+      materializeUserRuntime(ownerId);
+    } catch (err) {
+      logger.warn(
+        { ownerId, err },
+        'buildVolumeMounts: materializeUserRuntime failed; container will see no plugins',
+      );
+    }
+    // Mirror prepareHostPlugins: drop a stale empty command index that may
+    // have been cached before this runtime tree existed (plugin-command-index.ts:235).
+    invalidateUserCommandIndex(ownerId);
+    mounts.push({
+      hostPath: runtimeRoot,
+      containerPath: CONTAINER_PLUGINS_PATH,
+      readonly: true,
     });
   }
 
@@ -943,7 +1020,15 @@ export async function runContainerAgent(
         );
         container.kill();
       });
-      container.stdin.write(JSON.stringify(input));
+      // Derive a new input with docker-runtime plugins injected; never mutate
+      // the caller's `input` object (queue/log/retry paths reuse the same ref).
+      const dockerInput: ContainerInput = {
+        ...input,
+        plugins: group.created_by
+          ? loadUserPlugins(group.created_by, { runtime: 'docker' })
+          : [],
+      };
+      container.stdin.write(JSON.stringify(dockerInput));
       container.stdin.end();
 
       let timedOut = false;
@@ -1550,7 +1635,18 @@ export async function runHostAgent(
     // 禁用记忆层且配置了 customCwd 时不覆盖 CLAUDE_CONFIG_DIR，让 SDK 使用用户真实 $HOME/.claude/
     // 未配 customCwd 时保留 override，避免 HappyClaw 的 cwd 污染 ~/.claude/projects/
     if (!disableMemoryLayer || !group.customCwd) {
-      hostEnv['CLAUDE_CONFIG_DIR'] = groupSessionsDir;
+      // Resolve symlinks so CLAUDE_CONFIG_DIR ends up as the real on-disk path.
+      // Some external layer (suspected backend rate-limiter) has been observed to
+      // pin failure state to specific CLAUDE_CONFIG_DIR path strings; allowing
+      // operators to redirect the literal path via a symlink (e.g. mv main main-v2
+      // && ln -s main-v2 main) is a cheap escape hatch when a path gets "tainted".
+      let resolvedSessionsDir = groupSessionsDir;
+      try {
+        resolvedSessionsDir = fs.realpathSync(groupSessionsDir);
+      } catch {
+        // Path may not exist yet on first spawn; fall back to the literal path.
+      }
+      hostEnv['CLAUDE_CONFIG_DIR'] = resolvedSessionsDir;
     }
 
     if (disableMemoryLayer) {
@@ -1614,17 +1710,17 @@ export async function runHostAgent(
       if (!hostEnv[key]) hostEnv[key] = value;
     }
 
-    // Ensure the resolved claude binary path takes precedence over any stub in node_modules/.bin/
-    // 新版本 SDK (0.2.114+) 内部使用 which 查找 claude CLI，但 node_modules/.bin/claude
-    // 可能是 stub。通过 which 找到的实际路径应该优先被找到。
+    // Prepend the resolved claude binary directory to PATH so SDK subprocesses
+    // (which look up `claude` via PATH) hit the correct binary first. agent-capabilities
+    // prefers the SDK-bundled binary over `which` to avoid third-party wrappers
+    // (e.g. cmux) that hijack `claude` in PATH and break subprocess invocation.
     if (capResult.resolvedPaths['claude']) {
       const resolvedClaudeDir = path.dirname(capResult.resolvedPaths['claude']);
-      // 将 resolved claude 所在目录放到 PATH 最前面，确保优先找到
       const currentPath = hostEnv['PATH'] || process.env.PATH || '';
       hostEnv['PATH'] = `${resolvedClaudeDir}:${currentPath}`;
       logger.info(
         { group: group.name, resolvedClaudeDir, resolvedPath: capResult.resolvedPaths['claude'] },
-        'Host preflight: using resolved claude from which',
+        'Host preflight: claude binary resolved',
       );
     }
 
@@ -1816,7 +1912,16 @@ export async function runHostAgent(
         );
         killProcessTree(proc);
       });
-      proc.stdin.write(JSON.stringify(input));
+      // Derive a new input with host-runtime plugins injected; never mutate
+      // the caller's `input` object (queue/log/retry paths reuse the same ref).
+      // prepareHostPlugins mirrors the docker path's pre-spawn materialize so
+      // a freshly-enabled v2 user (no runtime/ on disk yet) doesn't see 0
+      // plugins.
+      const hostInput: ContainerInput = {
+        ...input,
+        plugins: prepareHostPlugins(group.created_by),
+      };
+      proc.stdin.write(JSON.stringify(hostInput));
       proc.stdin.end();
 
       // 9. 超时管理

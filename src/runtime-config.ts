@@ -3390,6 +3390,80 @@ export function saveUserWeChatConfig(
   return normalized;
 }
 
+// ========== WhatsApp User IM Config ==========
+
+export interface UserWhatsAppConfig {
+  accountId: string;
+  phoneNumber: string;
+  enabled?: boolean;
+  /** Whether the user has completed Baileys QR pairing (set by future PR) */
+  paired?: boolean;
+  updatedAt: string | null;
+}
+
+interface StoredWhatsAppProviderConfigV1 {
+  version: 1;
+  accountId: string;
+  phoneNumber: string;
+  enabled?: boolean;
+  paired?: boolean;
+  updatedAt: string;
+}
+
+export function getUserWhatsAppConfig(
+  userId: string,
+): UserWhatsAppConfig | null {
+  const filePath = path.join(userImDir(userId), 'whatsapp.json');
+  try {
+    if (!fs.existsSync(filePath)) return null;
+    const content = fs.readFileSync(filePath, 'utf-8');
+    const parsed = JSON.parse(content) as Record<string, unknown>;
+    if (parsed.version !== 1) return null;
+
+    const stored = parsed as unknown as StoredWhatsAppProviderConfigV1;
+    return {
+      accountId: ((stored.accountId as string) ?? 'default').trim(),
+      phoneNumber: ((stored.phoneNumber as string) ?? '').trim(),
+      enabled: stored.enabled,
+      paired: stored.paired,
+      updatedAt: stored.updatedAt || null,
+    };
+  } catch (err) {
+    logger.warn({ err, userId }, 'Failed to read user WhatsApp config');
+    return null;
+  }
+}
+
+export function saveUserWhatsAppConfig(
+  userId: string,
+  next: Omit<UserWhatsAppConfig, 'updatedAt'>,
+): UserWhatsAppConfig {
+  const normalized: UserWhatsAppConfig = {
+    accountId: (next.accountId ?? 'default').trim() || 'default',
+    phoneNumber: (next.phoneNumber ?? '').trim(),
+    enabled: next.enabled,
+    paired: next.paired,
+    updatedAt: new Date().toISOString(),
+  };
+
+  const payload: StoredWhatsAppProviderConfigV1 = {
+    version: 1,
+    accountId: normalized.accountId,
+    phoneNumber: normalized.phoneNumber,
+    enabled: normalized.enabled,
+    paired: normalized.paired,
+    updatedAt: normalized.updatedAt || new Date().toISOString(),
+  };
+
+  const dir = userImDir(userId);
+  fs.mkdirSync(dir, { recursive: true });
+  const filePath = path.join(dir, 'whatsapp.json');
+  const tmp = `${filePath}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(payload, null, 2) + '\n', 'utf-8');
+  fs.renameSync(tmp, filePath);
+  return normalized;
+}
+
 // ========== DingTalk User IM Config ==========
 
 export function getUserDingTalkConfig(
@@ -3535,6 +3609,15 @@ export interface SystemSettings {
   // 关闭 admin host 模式下 HappyClaw 自带的 memory 注入层（MCP 工具、模板 CLAUDE.md、WORKSPACE_GLOBAL/MEMORY env）
   // 启用后 admin 可以在 host 模式下完全按原生 Claude Code 的 Playbook 使用 ~/.claude/ 下的 memory/skills/rules
   disableMemoryLayerForAdminHost: boolean;
+  // Plugin catalog 自动扫描：true（默认）= 启动 5s 后扫一次 + 每小时一次；
+  // false = 关闭定时扫描，admin 仍可手点 POST /api/plugins/catalog/scan。
+  // 适用于不希望本机私有 plugin 自动入共享 catalog 的环境。
+  pluginAutoScan: boolean;
+  // 定时任务逾期容忍窗口（毫秒）。任何 next_run 落在过去且距今超过该窗口的任务
+  // 在 scheduler 轮询时直接跳过本次（next_run 推到下一次），避免停机/重启后多个
+  // 跨天积压任务集体在重启那一秒并发 fire 刷屏。
+  // 0 = 关闭（保留旧行为：无视逾期时长全部 backfill）。默认 300000 (5 分钟)。
+  taskBackfillGraceMs: number;
 }
 
 const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
@@ -3555,6 +3638,8 @@ const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
   externalClaudeDir: '',
   autoCompactWindow: 0,
   disableMemoryLayerForAdminHost: false,
+  pluginAutoScan: true,
+  taskBackfillGraceMs: 300000,
 };
 
 function parseIntEnv(envVar: string | undefined, fallback: number): number {
@@ -3649,6 +3734,15 @@ function readSystemSettingsFromFile(): SystemSettings | null {
       typeof raw.disableMemoryLayerForAdminHost === 'boolean'
         ? raw.disableMemoryLayerForAdminHost
         : DEFAULT_SYSTEM_SETTINGS.disableMemoryLayerForAdminHost,
+    pluginAutoScan:
+      typeof raw.pluginAutoScan === 'boolean'
+        ? raw.pluginAutoScan
+        : DEFAULT_SYSTEM_SETTINGS.pluginAutoScan,
+    taskBackfillGraceMs:
+      typeof raw.taskBackfillGraceMs === 'number' &&
+      raw.taskBackfillGraceMs >= 0
+        ? raw.taskBackfillGraceMs
+        : DEFAULT_SYSTEM_SETTINGS.taskBackfillGraceMs,
   };
 }
 
@@ -3713,6 +3807,14 @@ function buildEnvFallbackSettings(): SystemSettings {
     disableMemoryLayerForAdminHost:
       process.env.DISABLE_MEMORY_LAYER_FOR_ADMIN_HOST === 'true' ||
       DEFAULT_SYSTEM_SETTINGS.disableMemoryLayerForAdminHost,
+    pluginAutoScan:
+      process.env.PLUGIN_AUTO_SCAN === 'false'
+        ? false
+        : DEFAULT_SYSTEM_SETTINGS.pluginAutoScan,
+    taskBackfillGraceMs: parseIntEnv(
+      process.env.TASK_BACKFILL_GRACE_MS,
+      DEFAULT_SYSTEM_SETTINGS.taskBackfillGraceMs,
+    ),
   };
 }
 
@@ -3807,6 +3909,19 @@ export function saveSystemSettings(
   } else if (merged.autoCompactWindow > 0) {
     if (merged.autoCompactWindow < 10000) merged.autoCompactWindow = 10000;
     if (merged.autoCompactWindow > 2000000) merged.autoCompactWindow = 2000000;
+  }
+
+  // taskBackfillGraceMs: 0 = 关闭（旧行为：无视逾期全 backfill）；
+  // >0 限制在 [1s, 24h]，避免误配置成几毫秒导致正常任务也被跳过。
+  if (
+    merged.taskBackfillGraceMs < 0 ||
+    !Number.isFinite(merged.taskBackfillGraceMs)
+  ) {
+    merged.taskBackfillGraceMs = 0;
+  } else if (merged.taskBackfillGraceMs > 0) {
+    if (merged.taskBackfillGraceMs < 1000) merged.taskBackfillGraceMs = 1000;
+    if (merged.taskBackfillGraceMs > 86400000)
+      merged.taskBackfillGraceMs = 86400000;
   }
 
   // Validate externalClaudeDir: must be empty or an absolute directory path

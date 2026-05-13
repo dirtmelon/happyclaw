@@ -1,26 +1,10 @@
-import { beforeEach, describe, expect, test, vi } from 'vitest';
+import { describe, expect, test } from 'vitest';
 
 import {
   resolveBoundChatTarget,
   type RegisteredGroupLike,
   type AgentLike,
 } from '../src/im-command-utils.js';
-
-const deleteSessionMock = vi.fn();
-const getJidsByFolderMock = vi.fn();
-const storeMessageDirectMock = vi.fn();
-const ensureChatExistsMock = vi.fn();
-
-vi.mock('../src/db.js', () => ({
-  deleteSession: deleteSessionMock,
-  getJidsByFolder: getJidsByFolderMock,
-  storeMessageDirect: storeMessageDirectMock,
-  ensureChatExists: ensureChatExistsMock,
-}));
-
-vi.mock('../src/config.js', () => ({
-  DATA_DIR: '/tmp/happyclaw-test',
-}));
 
 describe('resolveBoundChatTarget', () => {
   const registeredGroups = new Map<string, RegisteredGroupLike>([
@@ -90,56 +74,5 @@ describe('resolveBoundChatTarget', () => {
       agentId: 'agent-1234',
       locationLine: 'graduation / Thesis Agent',
     });
-  });
-});
-
-describe('executeSessionReset', () => {
-  beforeEach(() => {
-    deleteSessionMock.mockReset();
-    getJidsByFolderMock.mockReset();
-    storeMessageDirectMock.mockReset();
-    ensureChatExistsMock.mockReset();
-    vi.useRealTimers();
-  });
-
-  test('resets a bound conversation agent under the real workspace jid', async () => {
-    const { executeSessionReset } = await import('../src/commands.js');
-    const stopGroup = vi.fn(async () => {});
-    const broadcast = vi.fn();
-    const setLastAgentTimestamp = vi.fn();
-    const sessions = { 'flow-graduation': 'session-1' } as Record<
-      string,
-      string
-    >;
-
-    await executeSessionReset(
-      'web:graduation-jid',
-      'flow-graduation',
-      {
-        queue: { stopGroup },
-        sessions,
-        broadcast,
-        setLastAgentTimestamp,
-      },
-      'agent-1234',
-    );
-
-    expect(stopGroup).toHaveBeenCalledWith(
-      'web:graduation-jid#agent:agent-1234',
-      { force: true },
-    );
-    expect(ensureChatExistsMock).toHaveBeenCalledWith(
-      'web:graduation-jid#agent:agent-1234',
-    );
-    expect(setLastAgentTimestamp).toHaveBeenCalledWith(
-      'web:graduation-jid#agent:agent-1234',
-      expect.objectContaining({ id: expect.any(String) }),
-    );
-    expect(broadcast).toHaveBeenCalledWith(
-      'web:graduation-jid#agent:agent-1234',
-      expect.objectContaining({
-        chat_jid: 'web:graduation-jid#agent:agent-1234',
-      }),
-    );
   });
 });

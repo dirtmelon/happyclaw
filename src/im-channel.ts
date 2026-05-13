@@ -38,6 +38,12 @@ import {
   type DiscordChannelInfo,
   type DiscordGuildInfo,
 } from './discord.js';
+import {
+  createWhatsAppConnection,
+  type WhatsAppConnection,
+  type WhatsAppConnectionConfig,
+  type WhatsAppConnectionState,
+} from './whatsapp.js';
 import { logger } from './logger.js';
 import type { FeishuMessageMeta } from './types.js';
 import {
@@ -902,5 +908,118 @@ export function createDiscordChannel(
       return inner.getGuildInfo(chatId);
     },
   };
+  return channel;
+}
+
+// ─── WhatsApp Adapter ───────────────────────────────────────────
+
+export function createWhatsAppChannel(
+  config: WhatsAppConnectionConfig,
+  onConnectionUpdate?: (state: WhatsAppConnectionState) => void,
+): IMChannel & { getWhatsAppState?: () => WhatsAppConnectionState } {
+  let inner: WhatsAppConnection | null = null;
+
+  const channel: IMChannel & {
+    getWhatsAppState?: () => WhatsAppConnectionState;
+  } = {
+    channelType: 'whatsapp',
+
+    async connect(opts: IMChannelConnectOpts): Promise<boolean> {
+      inner = createWhatsAppConnection(config);
+      try {
+        await inner.connect({
+          onReady: opts.onReady,
+          onNewChat: opts.onNewChat,
+          onCommand: opts.onCommand,
+          ignoreMessagesBefore: opts.ignoreMessagesBefore,
+          resolveGroupFolder: opts.resolveGroupFolder,
+          resolveEffectiveChatJid: opts.resolveEffectiveChatJid,
+          onAgentMessage: opts.onAgentMessage,
+          onBotAddedToGroup: opts.onBotAddedToGroup,
+          onBotRemovedFromGroup: opts.onBotRemovedFromGroup,
+          shouldProcessGroupMessage: opts.shouldProcessGroupMessage,
+          isGroupOwnerMessage: opts.isGroupOwnerMessage,
+          isSenderAllowedInGroup: opts.isSenderAllowedInGroup,
+          onConnectionUpdate,
+        });
+        // Baileys connect 是 async fire-and-forget：socket 建好后立刻返回，
+        // 真实的 connected 状态要等 connection.update -> 'open' 才到。
+        // 这里我们返回 true 表示 socket 启动成功，连接状态由 onConnectionUpdate 推送。
+        return true;
+      } catch (err) {
+        logger.warn({ err }, 'WhatsApp channel connect failed');
+        inner = null;
+        return false;
+      }
+    },
+
+    async disconnect(): Promise<void> {
+      if (inner) {
+        await inner.disconnect();
+        inner = null;
+      }
+    },
+
+    async sendMessage(
+      chatId: string,
+      text: string,
+      localImagePaths?: string[],
+    ): Promise<void> {
+      if (!inner) {
+        logger.warn(
+          { chatId },
+          'WhatsApp channel not connected, skip sending message',
+        );
+        return;
+      }
+      await inner.sendMessage(chatId, text, localImagePaths);
+    },
+
+    async sendImage(
+      chatId: string,
+      imageBuffer: Buffer,
+      mimeType: string,
+      caption?: string,
+      fileName?: string,
+    ): Promise<void> {
+      if (!inner) {
+        logger.warn(
+          { chatId },
+          'WhatsApp channel not connected, skip sending image',
+        );
+        return;
+      }
+      await inner.sendImage(chatId, imageBuffer, mimeType, caption, fileName);
+    },
+
+    async sendFile(
+      chatId: string,
+      filePath: string,
+      fileName: string,
+    ): Promise<void> {
+      if (!inner) {
+        logger.warn(
+          { chatId },
+          'WhatsApp channel not connected, skip sending file',
+        );
+        return;
+      }
+      await inner.sendFile(chatId, filePath, fileName);
+    },
+
+    async setTyping(chatId: string, isTyping: boolean): Promise<void> {
+      if (!inner) return;
+      await inner.sendTyping(chatId, isTyping);
+    },
+
+    isConnected(): boolean {
+      return inner?.isConnected() ?? false;
+    },
+
+    getWhatsAppState(): WhatsAppConnectionState {
+      return inner?.getState() ?? { status: 'disconnected' };
+    },
+  };
+
   return channel;
 }
