@@ -9403,10 +9403,19 @@ async function main(): Promise<void> {
         const broadcastFolder = options.workspaceFolder ?? ownerHome?.folder;
         if (broadcastFolder) {
           const localImages = extractLocalImImagePaths(text, broadcastFolder);
+          // chatJid 指向任务关联的源 workspace。当它本身是 IM channel（如 feishu:），
+          // 说明源群已通过上游 `sendMessage(chatJid, ...)` 直发收到本消息（见
+          // runScriptTask 在 task-scheduler.ts:~671 的 step 1）。把它加入 alreadySentJids
+          // 让 broadcast 跳过同 channel 的 fallback 群，避免同一条消息被重复推到 owner
+          // 注册的另一个飞书/Telegram 群。isolated agent 任务的 workspace.jid 是
+          // ephemeral `web:task-xxx`，getChannelType 返回 null，自然不会加入此集合，
+          // 行为与修复前保持一致。
+          const alreadySent = new Set<string>();
+          if (getChannelType(chatJid)) alreadySent.add(chatJid);
           broadcastToOwnerIMChannels(
             options.ownerId,
             broadcastFolder,
-            new Set<string>(),
+            alreadySent,
             (jid) => sendImWithFailTracking(jid, text, localImages),
             options.notifyChannels,
           );
