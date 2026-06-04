@@ -140,7 +140,11 @@ export type MessageSourceKind =
   | 'user_command'
   | 'scheduled_task_prompt'
   | 'legacy'
-  | 'auto_continue';
+  | 'auto_continue'
+  // Cursor backend completed a turn with empty `result.result`; accumulated
+  // `text_delta` was promoted into the final reply so IM channels still get
+  // a message. See `src/index.ts` empty-result fallback blocks.
+  | 'stream_fallback';
 
 export type MessageFinalizationReason =
   | 'completed'

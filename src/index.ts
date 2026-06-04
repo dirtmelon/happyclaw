@@ -3517,6 +3517,32 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             return;
           }
 
+          // Cursor backend symmetric fallback (see processAgentConversation's
+          // matching block): when a turn ends with empty `result.result` but
+          // text_delta accumulated during the run, promote the accumulated
+          // text so the normal first-reply path below delivers it (with
+          // `streamingCardHandledIM` de-dup). Without this, cursor with
+          // `claude-opus-4-7-thinking-max` can complete a turn silently and
+          // leave the IM channel with no reply.
+          if (
+            result.status !== 'stream' &&
+            !result.result &&
+            streamingAccumulatedText.trim()
+          ) {
+            result = {
+              ...result,
+              result: streamingAccumulatedText.trim(),
+              sourceKind: result.sourceKind ?? 'stream_fallback',
+            };
+            logger.info(
+              {
+                chatJid,
+                accLen: streamingAccumulatedText.length,
+              },
+              'Promoted accumulated text_delta to result (cursor empty-result fallback)',
+            );
+          }
+
           // Streaming output callback — called for each agent result
           if (result.result) {
             const raw =
@@ -4798,26 +4824,36 @@ function startIpcWatcher(): void {
                   },
                 });
 
-                // Forward to IM channel — but NOT for conversation agent messages.
-                // Conversation agents handle their own IM routing in
-                // processAgentConversation's wrappedOnOutput callback.
-                if (!ipcAgentId) {
-                  const ipcImRoute = activeImReplyRoutes.get(sourceGroup);
-                  if (
-                    ipcImRoute &&
-                    getChannelType(data.chatJid) === null &&
-                    ipcImRoute !== data.chatJid
-                  ) {
-                    const localImages = extractLocalImImagePaths(
-                      data.text,
-                      sourceGroup,
-                    );
-                    sendImWithFailTracking(ipcImRoute, data.text, localImages);
-                  }
+                // Forward to IM channel. Mirrors the send_image branch
+                // below — `resolveImRoute()` handles the three cases
+                // (conversation agent / home / regular group) uniformly, so
+                // conversation-agent send_message text now reaches IM
+                // consistently with send_image (previously a gap: agents
+                // could send images to IM but not text).
+                const ipcImRoute = resolveImRoute({
+                  ipcAgentId,
+                  isHome,
+                  chatJid: data.chatJid,
+                  sourceGroup,
+                });
+                if (
+                  ipcImRoute &&
+                  getChannelType(data.chatJid) === null &&
+                  ipcImRoute !== data.chatJid
+                ) {
+                  const localImages = extractLocalImImagePaths(
+                    data.text,
+                    sourceGroup,
+                  );
+                  sendImWithFailTracking(ipcImRoute, data.text, localImages);
+                }
 
-                  // Scheduled-task output routing. Decision logic is in
-                  // resolveTaskRoutingDecision() (src/task-routing.ts) so it
-                  // can be unit-tested without booting this module.
+                // Scheduled-task output routing. Skipped for conversation
+                // agents — agents don't run scheduled tasks (the interactive
+                // agent path has no ipcTaskId). Decision logic is in
+                // resolveTaskRoutingDecision() (src/task-routing.ts) so it
+                // can be unit-tested without booting this module.
+                if (!ipcAgentId) {
                   const routingDecision = resolveTaskRoutingDecision(
                     data,
                     ipcTaskId,
@@ -6332,6 +6368,35 @@ async function processAgentConversation(
       // don't get killed while the agent is actively working.
       resetIdleTimer();
       return;
+    }
+
+    // Cursor backend may emit `{status:'success', result:''}` when a turn ends
+    // with only tool_use / thinking (no synthesized text — common with
+    // `claude-opus-4-7-thinking-max`). When text_delta did accumulate during
+    // the turn, promote it into `output.result` so the normal first-reply
+    // delivery below kicks in (DB persist + IM static send gated by
+    // `streamingCardHandledIM` to avoid duplicate-sending alongside the
+    // Feishu streaming card). Without this, the only safety net is the
+    // end-of-run fallback at the try/finally tail, which doesn't honor
+    // `streamingCardHandledIM` and risks double-sending.
+    if (
+      output.status !== 'stream' &&
+      !output.result &&
+      agentStreamingAccText.trim()
+    ) {
+      output = {
+        ...output,
+        result: agentStreamingAccText.trim(),
+        sourceKind: output.sourceKind ?? 'stream_fallback',
+      };
+      logger.info(
+        {
+          chatJid,
+          agentId,
+          accLen: agentStreamingAccText.length,
+        },
+        'Promoted accumulated text_delta to output.result (cursor empty-result fallback)',
+      );
     }
 
     // Agent reply
